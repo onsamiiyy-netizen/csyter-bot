@@ -166,7 +166,15 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # аккаунт одобрен — берём задание
-    t["status"] = "active"
+    if "workers" not in t:
+        t["workers"] = []
+    if uid in t["workers"]:
+        await q.edit_message_text("ты уже берёшь это задание")
+        return
+    t["workers"].append(uid)
+    limit = t.get("limit", 1)
+    if len(t["workers"]) >= limit:
+        t["status"] = "active"
     t["wid"] = uid
     save(d)
 
@@ -384,7 +392,12 @@ async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not t or t.get("wid") != uid:
         await q.answer("не найдено")
         return
-    t["status"] = "open"
+    if "workers" not in t:
+        t["workers"] = []
+    if uid in t["workers"]:
+        t["workers"].remove(uid)
+    if t["status"] == "active" and len(t["workers"]) < t.get("limit", 1):
+        t["status"] = "open"
     t["wid"] = None
     save(d)
     await q.edit_message_text(f"#{tid} возвращено в каталог")
@@ -412,7 +425,7 @@ async def show_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not v:
         await q.edit_message_text("не найдено")
         return
-    txt = f"💼 {v['title']}\n\n{v['desc']}\n\n📞 {v['contact']}"
+    txt = f"💼 {v['title']}\n\n{v['desc']}\n\n💰 оплата: {v.get('price', '—')}\n\n👤 {v.get('contact', '—')}"
     kb = [[InlineKeyboardButton("◀️ назад", callback_data="back_vac")]]
     await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
 
