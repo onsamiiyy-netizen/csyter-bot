@@ -141,6 +141,8 @@ async def _save_task(q_or_msg, ctx, from_msg=False):
         "city": ctx.user_data.get("city", ""), "theme": ctx.user_data.get("theme", ""),
         "price": ctx.user_data.get("price", "0"),
         "dl": ctx.user_data["dl"],
+        "limit": ctx.user_data.get("limit", 1),
+        "workers": [],
         "type": ctx.user_data.get("type", "free"),
         "review_text": ctx.user_data.get("review_text"),
         "eid": eid, "wid": None, "status": "open",
@@ -179,6 +181,10 @@ async def on_create_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("дедлайн (или -):")
     elif step == "dl":
         ctx.user_data["dl"] = "—" if txt == "-" else txt
+        ctx.user_data["step"] = "limit"
+        await update.message.reply_text("лимит исполнителей (число):")
+    elif step == "limit":
+        ctx.user_data["limit"] = int(txt) if txt.isdigit() else 1
         ctx.user_data["step"] = "pick_type"
         kb = [[InlineKeyboardButton("📝 рабочий сам пишет", callback_data="tp_free"),
                InlineKeyboardButton("📋 готовый текст", callback_data="tp_fixed")]]
@@ -535,21 +541,27 @@ async def on_vac_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("описание:")
     elif step == "desc":
         ctx.user_data["vac_desc"] = txt
+        ctx.user_data["vac_step"] = "price"
+        await update.message.reply_text("оплата:")
+    elif step == "price":
+        ctx.user_data["vac_price"] = txt
         ctx.user_data["vac_step"] = "contact"
-        await update.message.reply_text("контакт:")
+        await update.message.reply_text("юзернейм для связи (@username):")
     elif step == "contact":
         d = db()
         if "vacs" not in d:
             d["vacs"] = {}
-        vn = str(len(d["vacs"]) + 1)
+        existing = [int(k) for k in d["vacs"].keys() if k.isdigit()]
+        vn = str(max(existing) + 1 if existing else 1)
         d["vacs"][vn] = {
             "title": ctx.user_data.pop("vac_title"),
             "desc": ctx.user_data.pop("vac_desc"),
+            "price": ctx.user_data.pop("vac_price"),
             "contact": txt
         }
         ctx.user_data.pop("vac_step", None)
         save(d)
-        await update.message.reply_text(f"вакансия добавлена", reply_markup=main_kb())
+        await update.message.reply_text("вакансия добавлена", reply_markup=main_kb())
 
 async def del_vac_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = db()
@@ -579,7 +591,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("vac_step"):
         await on_vac_input(update, ctx)
         return
-    if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "review_text"):
+    if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "limit", "review_text"):
         await on_create_input(update, ctx)
         return
     if ctx.user_data.get("pl_step") == "add":
