@@ -27,7 +27,7 @@ def save(d):
         json.dump(d, f, ensure_ascii=False, indent=2)
 
 def main_kb():
-    return ReplyKeyboardMarkup([["➕ задание", "📋 задания"], ["🗂 платформы", "🔍 проверить"], ["💼 вакансии"]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([["➕ задание", "📋 задания"], ["🗂 платформы", "🔍 проверить"], ["💼 вакансии", "⚡ штрафы"]], resize_keyboard=True)
 
 async def reupload_photo(file_id):
     from io import BytesIO
@@ -259,61 +259,91 @@ async def del_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def check_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
-    sent = False
-
-    # аккаунты
-    for app_key, app in d["apps"].items():
-        if app.get("status") != "checking":
-            continue
-        # проверяем что задание принадлежит этому админу
-        t = d["t"].get(str(app.get("tid")), {})
-        if t.get("eid") != uid:
-            continue
-        wname = d["u"].get(str(app["uid"]), {}).get("name", str(app["uid"]))
-        caption = f"🔍 аккаунт [{d['t'].get(str(app.get('tid')),{}).get('platform','')}]\nрабочий: {wname}"
-        kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"acc_ok|{app_key}"),
-               InlineKeyboardButton("❌ отказать", callback_data=f"acc_no|{app_key}")]]
-        buf = await reupload_photo(app["file_id"])
-        try:
-            if buf:
-                await update.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-            else:
-                await update.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-            sent = True
-        except Exception as e:
-            log.warning(e)
-
-    # тексты отзывов на проверке
-    for tid, t in d["t"].items():
-        if t.get("status") != "review_check" or t.get("eid") != uid:
-            continue
-        wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-        txt = f"📝 текст отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {wname}\n\n{t.get('draft','')}"
-        kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"txt_ok|{tid}"),
-               InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
-        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-        sent = True
-
-    # скриншоты отзывов
-    for tid, t in d["t"].items():
-        if t.get("status") != "done" or t.get("eid") != uid:
-            continue
-        wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-        caption = f"📸 скриншот отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {wname}"
-        kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
-               InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
-        buf = await reupload_photo(t["result"])
-        try:
-            if buf:
-                await update.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-            else:
-                await update.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-            sent = True
-        except Exception as e:
-            log.warning(e)
-
-    if not sent:
+    accs = sum(1 for ak, ap in d["apps"].items() if ap.get("status") == "checking" and d["t"].get(str(ap.get("tid")), {}).get("eid") == uid)
+    txts = sum(1 for t in d["t"].values() if t.get("status") == "review_check" and t.get("eid") == uid)
+    revs = sum(1 for t in d["t"].values() if t.get("status") == "done" and t.get("eid") == uid)
+    total = accs + txts + revs
+    if total == 0:
         await update.message.reply_text("нечего проверять")
+        return
+    kb = []
+    if accs: kb.append([InlineKeyboardButton(f"👤 аккаунты ({accs})", callback_data="chk_acc")])
+    if txts: kb.append([InlineKeyboardButton(f"📝 тексты отзывов ({txts})", callback_data="chk_txt")])
+    if revs: kb.append([InlineKeyboardButton(f"📸 скриншоты ({revs})", callback_data="chk_rev")])
+    await update.message.reply_text("что проверяем?", reply_markup=InlineKeyboardMarkup(kb))
+
+async def check_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    section = q.data[4:]  # acc / txt / rev
+    d = db()
+    await q.edit_message_reply_markup(reply_markup=None)
+
+    if section == "acc":
+        sent = False
+        for app_key, app in d["apps"].items():
+            if app.get("status") != "checking":
+                continue
+            t = d["t"].get(str(app.get("tid")), {})
+            if t.get("eid") != uid:
+                continue
+            wname = d["u"].get(str(app["uid"]), {}).get("name", str(app["uid"]))
+            username = d["u"].get(str(app["uid"]), {}).get("username", "")
+            uinfo = f"@{username}" if username else wname
+            caption = f"👤 аккаунт [{t.get('platform','')}]\nрабочий: {uinfo}"
+            kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"acc_ok|{app_key}"),
+                   InlineKeyboardButton("❌ отказать", callback_data=f"acc_no|{app_key}")]]
+            buf = await reupload_photo(app["file_id"])
+            try:
+                if buf:
+                    await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+                else:
+                    await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
+                sent = True
+            except Exception as e:
+                log.warning(e)
+        if not sent:
+            await q.message.reply_text("пусто")
+
+    elif section == "txt":
+        sent = False
+        for tid, t in d["t"].items():
+            if t.get("status") != "review_check" or t.get("eid") != uid:
+                continue
+            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
+            username = d["u"].get(str(t["wid"]), {}).get("username", "")
+            uinfo = f"@{username}" if username else wname
+            txt = f"📝 текст отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}\n\n{t.get('draft','')}"
+            kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"txt_ok|{tid}"),
+                   InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
+            await q.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+            sent = True
+        if not sent:
+            await q.message.reply_text("пусто")
+
+    elif section == "rev":
+        sent = False
+        for tid, t in d["t"].items():
+            if t.get("status") != "done" or t.get("eid") != uid:
+                continue
+            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
+            username = d["u"].get(str(t["wid"]), {}).get("username", "")
+            uinfo = f"@{username}" if username else wname
+            caption = f"📸 скриншот отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}"
+            kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
+                   InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
+            buf = await reupload_photo(t["result"])
+            try:
+                if buf:
+                    await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+                else:
+                    await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
+                sent = True
+            except Exception as e:
+                log.warning(e)
+        if not sent:
+            await q.message.reply_text("пусто")
 
 
 # одобрить аккаунт
@@ -582,12 +612,126 @@ async def del_vac_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save(d)
     await q.edit_message_text("удалено")
 
+
+# ── штрафы ─────────────────────────────────────────────────────────────────────
+
+async def fine_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    d = db()
+    workers = [(k, v) for k, v in d["u"].items() if v.get("role") == "worker"]
+    if not workers:
+        await update.message.reply_text("рабочих нет", reply_markup=main_kb())
+        return
+    kb = [[InlineKeyboardButton(
+        f"@{v.get('username', v.get('name', k))}",
+        callback_data=f"fine_{k}"
+    )] for k, v in workers]
+    await update.message.reply_text("выбери рабочего:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def fine_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ctx.user_data["fine_uid"] = q.data[5:]
+    ctx.user_data["fine_step"] = "amount"
+    await q.edit_message_text("сумма штрафа (руб):")
+
+async def on_fine_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    step = ctx.user_data.get("fine_step")
+    txt = update.message.text.strip()
+    if step == "amount":
+        if not txt.isdigit():
+            await update.message.reply_text("введи число")
+            return
+        ctx.user_data["fine_amount"] = int(txt)
+        ctx.user_data["fine_step"] = "reason"
+        await update.message.reply_text("причина штрафа:")
+    elif step == "reason":
+        wid = ctx.user_data.pop("fine_uid")
+        amount = ctx.user_data.pop("fine_amount")
+        ctx.user_data.pop("fine_step", None)
+        d = db()
+        u = d["u"].get(str(wid), {})
+        u["balance"] = max(0, u.get("balance", 0) - amount)
+        save(d)
+        wname = u.get("username") or u.get("name", wid)
+        await update.message.reply_text(f"⚡ штраф -{amount} руб применён к @{wname}", reply_markup=main_kb())
+        try:
+            await Bot(WORKER_TOKEN).send_message(int(wid), f"⚡ тебе выписан штраф -{amount} руб\nпричина: {txt}\n\nновый баланс: {u['balance']} руб")
+        except Exception as e:
+            log.warning(e)
+
+
+# ── штрафы ─────────────────────────────────────────────────────────────────────
+
+FINE_AMOUNT, FINE_REASON = range(10, 12)
+
+async def fines_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    d = db()
+    # рабочие у которых есть выполненные задания
+    wids = set()
+    for t in d["t"].values():
+        if t.get("status") in ("closed",) and t.get("wid"):
+            wids.add(str(t["wid"]))
+    if not wids:
+        await update.message.reply_text("нет рабочих с выполненными заданиями")
+        return
+    kb = []
+    for wid in wids:
+        u = d["u"].get(wid, {})
+        username = u.get("username", "")
+        label = f"@{username}" if username else u.get("name", wid)
+        balance = u.get("balance", 0)
+        kb.append([InlineKeyboardButton(f"{label} · {balance} руб", callback_data=f"fine_{wid}")])
+    await update.message.reply_text("выбери рабочего:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def fine_pick_worker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    wid = q.data[5:]
+    ctx.user_data["fine_wid"] = wid
+    d = db()
+    u = d["u"].get(wid, {})
+    username = u.get("username", "")
+    name = f"@{username}" if username else u.get("name", wid)
+    balance = u.get("balance", 0)
+    await q.edit_message_text(f"рабочий: {name}\nбаланс: {balance} руб\n\nсумма штрафа:")
+    return FINE_AMOUNT
+
+async def fine_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+    if not txt.isdigit():
+        await update.message.reply_text("введи число:")
+        return FINE_AMOUNT
+    ctx.user_data["fine_amount"] = int(txt)
+    await update.message.reply_text("причина штрафа:")
+    return FINE_REASON
+
+async def fine_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    wid = ctx.user_data.pop("fine_wid")
+    amount = ctx.user_data.pop("fine_amount")
+    reason = update.message.text.strip()
+    d = db()
+    u = d["u"].get(wid, {})
+    old_balance = u.get("balance", 0)
+    u["balance"] = max(0, old_balance - amount)
+    save(d)
+    username = u.get("username", "")
+    name = f"@{username}" if username else u.get("name", wid)
+    await update.message.reply_text(f"⚡️ штраф применён\n{name}: -{amount} руб\nпричина: {reason}", reply_markup=main_kb())
+    try:
+        await Bot(WORKER_TOKEN).send_message(int(wid), f"⚡️ тебе выписан штраф -{amount} руб\nпричина: {reason}\n\nновый баланс: {u['balance']} руб")
+    except Exception as e:
+        log.warning(e)
+    return ConversationHandler.END
+
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text("ок", reply_markup=main_kb())
     return ConversationHandler.END
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.user_data.get("fine_step"):
+        await on_fine_input(update, ctx)
+        return
     if ctx.user_data.get("vac_step"):
         await on_vac_input(update, ctx)
         return
@@ -604,6 +748,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif txt == "💼 вакансии": await vacancies_menu(update, ctx)
     elif txt == "➕ добавить вакансию": await add_vac_start(update, ctx)
     elif txt == "🗑 удалить вакансию": await del_vac_start(update, ctx)
+    elif txt == "⚡ штрафы": await fine_start(update, ctx)
+    elif txt == "⚡️ штрафы": await fines_menu(update, ctx)
     elif txt == "◀️ назад": await start(update, ctx)
     elif txt == "➕ задание": await create_start(update, ctx)
     elif txt == "➕ добавить": await add_pl_start(update, ctx)
@@ -640,7 +786,17 @@ async def main():
         states={99: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_no_done)]},
         fallbacks=[CommandHandler("cancel", cancel)], per_message=False
     ))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(fine_pick_worker, pattern="^fine_")],
+        states={
+            FINE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, fine_amount)],
+            FINE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, fine_reason)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
+    ))
     app.add_handler(CallbackQueryHandler(withdraw_ok, pattern=r"^wok\|"))
+    app.add_handler(CallbackQueryHandler(check_section, pattern="^chk_"))
+    app.add_handler(CallbackQueryHandler(fine_pick, pattern="^fine_"))
     app.add_handler(CallbackQueryHandler(acc_ok, pattern=r"^acc_ok\|"))
     app.add_handler(CallbackQueryHandler(txt_ok, pattern=r"^txt_ok\|"))
     app.add_handler(CallbackQueryHandler(rev_ok, pattern=r"^rev_ok\|"))
