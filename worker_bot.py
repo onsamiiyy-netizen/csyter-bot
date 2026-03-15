@@ -25,7 +25,7 @@ def save(d):
     with open(DB, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 
-HELP_URL = "https://t.me/XA1HS"
+HELP_URL = "@XA1HS"
 VACANCIES = {
     "1": {"title": "Исполнитель", "role": "executor"},
     "2": {"title": "Траффер", "role": "trafler"},
@@ -561,8 +561,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif txt == "📋 выполнить задание": await catalog(update, ctx)
     elif txt == "📥 мои задания": await my_tasks(update, ctx)
     elif txt == "💸 вывести": await withdraw_start(update, ctx)
-    elif txt in ("🆘 помощь", "🔗 получить ссылку"):
+    elif txt == "🆘 помощь":
         await update.message.reply_text(f"👉 {HELP_URL}")
+    elif txt == "🔗 получить ссылку":
+        await update.message.reply_text(f"напиши мне, я дам тебе ссылку 👉 {HELP_URL}")
     elif txt == "🔄 сменить вакансию":
         d2 = db()
         kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
