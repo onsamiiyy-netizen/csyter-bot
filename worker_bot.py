@@ -25,8 +25,24 @@ def save(d):
     with open(DB, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 
-def main_kb():
-    return ReplyKeyboardMarkup([["👤 профиль", "📋 выполнить задание"], ["📥 мои задания", "💸 вывести"], ["💼 вакансии"]], resize_keyboard=True)
+HELP_URL = "https://t.me/XA1HS"
+VACANCIES = {
+    "1": {"title": "Исполнитель", "role": "executor"},
+    "2": {"title": "Траффер", "role": "trafler"},
+    "3": {"title": "Поиск заказчиков", "role": "finder"},
+}
+
+def main_kb(role=None):
+    if role == "trafler":
+        return ReplyKeyboardMarkup([["🔗 получить ссылку", "🆘 помощь"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+    elif role == "finder":
+        return ReplyKeyboardMarkup([["🆘 помощь"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+    else:  # executor или None
+        return ReplyKeyboardMarkup([["👤 профиль", "📋 выполнить задание"], ["📥 мои задания", "💸 вывести"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+
+def get_kb(uid, d):
+    role = d["u"].get(str(uid), {}).get("vac_role")
+    return main_kb(role)
 
 async def notify_admins_photo(d, file_id, caption, kb):
     from io import BytesIO
@@ -61,9 +77,85 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
     if str(uid) not in d["u"]:
-        d["u"][str(uid)] = {"role": "worker", "name": update.effective_user.full_name, "id": uid}
+        d["u"][str(uid)] = {"role": "worker", "name": update.effective_user.full_name, "username": update.effective_user.username or "", "id": uid, "vacancy": None}
         save(d)
-    await update.message.reply_text("привет 👋", reply_markup=main_kb())
+    u = d["u"][str(uid)]
+    # если вакансия есть но нет роли — сбрасываем (старые данные)
+    if u.get("vacancy") and not u.get("vac_role"):
+        u["vacancy"] = None
+        save(d)
+    if not u.get("vacancy"):
+        await _show_vacancy_select(update.message, d, first=True)
+        return
+    role = u.get("vac_role")
+    await update.message.reply_text("привет 👋", reply_markup=main_kb(role))
+
+async def _show_vacancy_select(msg, d, first=False):
+    intro = "привет 👋\n\nдля начала выбери вакансию:" if first else "выбери вакансию:"
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await msg.reply_text(intro, reply_markup=InlineKeyboardMarkup(kb))
+
+VAC_DESCRIPTIONS = {
+    "1": (
+        "💼 Исполнитель\n\n"
+        "Ты через бот берёшь задание на любую платформу, выполняешь и получаешь оплату.\n\n"
+        "После подтверждения вакансии тебе станут доступны задания."
+    ),
+    "2": (
+        "💼 Траффер\n\n"
+        "Твоя задача — приглашать людей из сферы отзывов, которые будут активничать.\n\n"
+        "Для тебя выдаётся спец ссылка, по ней ты приглашаешь людей.\n"
+        "Оплата производится когда захочешь.\n\n"
+        "По всем вопросам: @XA1HS"
+    ),
+    "3": (
+        "💼 Поиск заказчиков\n\n"
+        "Заказчик — человек, которому нужны отзывы (повысить рейтинг).\n\n"
+        "Как искать:\n"
+        "1. Заходишь на платформу (2ГИС, Яндекс, Google), вбиваешь сферу, звонишь и говоришь: \"Здравствуйте, помогаю в поднятии рейтинга. Интересно узнать подробнее?\"\n"
+        "2. Пишешь в мессенджер: Добрый день! Мы помогаем бизнесу становиться заметнее через работу с отзывами...\n\n"
+        "Если соглашаются — скидывай контакт @XA1HS\n\n"
+        "Заработок: от 100 до 13 000 руб за одного заказчика.\n\n"
+        "Платформы для поиска: 2ГИС, Яндекс, Google, Авито, ВК, Юла, ЦИАН, HH.ru, WhatsApp\n\n"
+        "Сферы: автосервис, парикмахерская, гостиницы, клининг, ремонт техники, здоровье, мебель, съём квартир\n\n"
+        "Если заказчик задаёт вопросы — скрин в @XA1HS"
+    ),
+}
+
+async def select_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    vid = q.data[7:]
+    v = VACANCIES.get(vid)
+    if not v:
+        await q.edit_message_text("не найдено")
+        return
+    desc = VAC_DESCRIPTIONS.get(vid, v["title"])
+    kb = [[InlineKeyboardButton("✅ подтвердить", callback_data=f"confirvac_{vid}"),
+           InlineKeyboardButton("◀️ назад", callback_data="back_selvac")]]
+    await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup(kb))
+
+async def confirm_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    vid = q.data[9:]
+    v = VACANCIES.get(vid)
+    if not v:
+        await q.edit_message_text("не найдено")
+        return
+    d = db()
+    d["u"][str(uid)]["vacancy"] = {"id": vid, "title": v["title"]}
+    d["u"][str(uid)]["vac_role"] = v["role"]
+    save(d)
+    await q.edit_message_text(f"✅ вакансия подтверждена: {v['title']}")
+    await q.message.reply_text("готово 👇", reply_markup=get_kb(uid, d))
+
+async def back_selvac(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await q.edit_message_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -77,7 +169,15 @@ async def profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── каталог ────────────────────────────────────────────────────────────────────
 
 async def catalog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     d = db()
+    u = d["u"].get(str(uid), {})
+    if not u.get("vacancy"):
+        await _show_vacancy_select(update.message, d, first=True)
+        return
+    if u.get("vac_role") != "executor":
+        await update.message.reply_text("задания доступны только для исполнителей", reply_markup=main_kb(u.get("vac_role")))
+        return
     platforms = list({v["platform"] for v in d["t"].values() if v["status"] == "open"})
     if not platforms:
         await update.message.reply_text("заданий пока нет")
@@ -448,12 +548,20 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("withdraw_step"):
         await on_withdraw_input(update, ctx)
         return
+    uid = update.effective_user.id
+    d = db()
+    role = d["u"].get(str(uid), {}).get("vac_role")
     if txt == "👤 профиль": await profile(update, ctx)
     elif txt == "📋 выполнить задание": await catalog(update, ctx)
     elif txt == "📥 мои задания": await my_tasks(update, ctx)
-    elif txt == "💼 вакансии": await vacancies(update, ctx)
     elif txt == "💸 вывести": await withdraw_start(update, ctx)
-    else: await update.message.reply_text("?", reply_markup=main_kb())
+    elif txt in ("🆘 помощь", "🔗 получить ссылку"):
+        await update.message.reply_text(f"👉 {HELP_URL}")
+    elif txt == "🔄 сменить вакансию":
+        d2 = db()
+        kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+        await update.message.reply_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
+    else: await update.message.reply_text("?", reply_markup=main_kb(role))
 
 
 async def main():
@@ -471,6 +579,10 @@ async def main():
     app.add_handler(CallbackQueryHandler(skip_task, pattern=r"^skip\|"))
     app.add_handler(CallbackQueryHandler(take_task, pattern=r"^take\|"))
     app.add_handler(CallbackQueryHandler(back_cat, pattern="^back_cat$"))
+    app.add_handler(CallbackQueryHandler(select_vacancy, pattern="^selvac_"))
+    app.add_handler(CallbackQueryHandler(confirm_vacancy, pattern="^confirvac_"))
+    app.add_handler(CallbackQueryHandler(back_selvac, pattern="^back_selvac$"))
+    app.add_handler(CallbackQueryHandler(change_vacancy, pattern="^change_vac$"))
     app.add_handler(CallbackQueryHandler(show_vacancy, pattern="^vac_"))
     app.add_handler(CallbackQueryHandler(back_vac, pattern="^back_vac$"))
     app.add_handler(CallbackQueryHandler(cancel_task, pattern=r"^canceltask\|"))
