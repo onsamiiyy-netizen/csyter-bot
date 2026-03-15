@@ -732,9 +732,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("fine_step"):
         await on_fine_input(update, ctx)
         return
-    if ctx.user_data.get("vac_step"):
-        await on_vac_input(update, ctx)
-        return
     if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "limit", "review_text"):
         await on_create_input(update, ctx)
         return
@@ -745,9 +742,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if txt == "📋 задания": await all_tasks(update, ctx)
     elif txt == "🔍 проверить": await check_menu(update, ctx)
     elif txt == "🗂 платформы": await platforms_menu(update, ctx)
-    elif txt == "💼 вакансии": await vacancies_menu(update, ctx)
-    elif txt == "➕ добавить вакансию": await add_vac_start(update, ctx)
-    elif txt == "🗑 удалить вакансию": await del_vac_start(update, ctx)
     elif txt == "⚡ штрафы": await fine_start(update, ctx)
     elif txt == "⚡️ штрафы": await fines_menu(update, ctx)
     elif txt == "◀️ назад": await start(update, ctx)
