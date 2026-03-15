@@ -151,6 +151,12 @@ async def confirm_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(f"✅ вакансия подтверждена: {v['title']}")
     await q.message.reply_text("готово 👇", reply_markup=get_kb(uid, d))
 
+async def change_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await q.message.reply_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
+
 async def back_selvac(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
