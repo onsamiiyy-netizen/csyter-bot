@@ -219,6 +219,8 @@ async def all_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif t["status"] == "paused":
             btns = [InlineKeyboardButton("▶️ возобновить", callback_data=f"resume_{tid}"),
                     InlineKeyboardButton("🗑 удалить", callback_data=f"del_{tid}")]
+        else:
+            btns = [InlineKeyboardButton("🗑 удалить", callback_data=f"del_{tid}")]
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup([btns]) if btns else None)
 
 async def pause_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
