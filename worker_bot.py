@@ -139,7 +139,7 @@ async def confirm_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    vid = q.data[9:]
+    vid = q.data[10:]
     v = VACANCIES.get(vid)
     if not v:
         await q.edit_message_text("не найдено")
