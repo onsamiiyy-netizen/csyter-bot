@@ -27,7 +27,7 @@ def save(d):
         json.dump(d, f, ensure_ascii=False, indent=2)
 
 def main_kb():
-    return ReplyKeyboardMarkup([["➕ задание", "📋 задания"], ["🗂 платформы", "🔍 проверить"], ["💼 вакансии", "⚡ штрафы"]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([["➕ задание", "📋 задания"], ["🗂 платформы", "🔍 проверить"], ["⚡ штрафы"]], resize_keyboard=True)
 
 async def reupload_photo(file_id):
     from io import BytesIO
