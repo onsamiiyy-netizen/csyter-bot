@@ -278,10 +278,10 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("ты уже берёшь это задание")
         return
     t["workers"].append(uid)
+    t["wid"] = uid  # последний взявший для уведомлений
     limit = t.get("limit", 1)
     if len(t["workers"]) >= limit:
-        t["status"] = "active"
-    t["wid"] = uid
+        t["status"] = "active"  # скрываем из каталога только когда набрался лимит
     save(d)
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
