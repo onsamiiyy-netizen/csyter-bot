@@ -274,6 +274,7 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # аккаунт одобрен — берём задание
     t["wid"] = uid
     save(d)
+    log.info(f"TASK {tid} STATUS AFTER TAKE: {t['status']}")
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
     await notify_admins_text(d, f"🔔 {name} взял #{tid} [{platform}] {t['title']}")
@@ -360,7 +361,6 @@ async def review_text_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     t["draft"] = review_txt
-    t["status"] = "review_check"
     save(d)
 
     await update.message.reply_text("текст отправлен на проверку, ожидай ✅", reply_markup=main_kb())
@@ -402,7 +402,6 @@ async def submit_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     file_id = update.message.photo[-1].file_id
-    t["status"] = "done"
     t["result"] = file_id
     save(d)
 
