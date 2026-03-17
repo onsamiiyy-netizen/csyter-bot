@@ -267,7 +267,7 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["check_tid"] = tid
         await q.edit_message_text(f"❌ аккаунт отклонён\nпричина: {my.get('reason','')}\n\nскинь новый скриншот профиля:")
         return
-    if my_status in ("active", "review_check", "done"):
+    if my_status in ("active", "review_check", "done", "closed"):
         await q.edit_message_text("ты уже взял это задание")
         return
 
