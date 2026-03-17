@@ -1,16 +1,15 @@
 import logging, os, json, os
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-REJECT_ACC, REJECT_REV, REJECT_TXT = range(3)
+SEND_ACCOUNT, SEND_REVIEW, WRITE_REVIEW = range(3)
 
 DB = "db.json"
-TOKEN = os.getenv("ADMIN_TOKEN")
-WORKER_TOKEN = os.getenv("WORKER_TOKEN")
+TOKEN = os.getenv("WORKER_TOKEN")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 def db():
     if not os.path.exists(DB):
@@ -26,728 +25,535 @@ def save(d):
     with open(DB, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
 
-def main_kb():
-    return ReplyKeyboardMarkup([["➕ задание", "📋 задания"], ["🗂 платформы", "🔍 проверить"], ["⚡ штрафы"]], resize_keyboard=True)
+HELP_URL = "@XA1HS"
+VACANCIES = {
+    "1": {"title": "Исполнитель", "role": "executor"},
+    "2": {"title": "Траффер", "role": "trafler"},
+    "3": {"title": "Поиск заказчиков", "role": "finder"},
+}
 
-async def reupload_photo(file_id):
+def main_kb(role=None):
+    if role == "trafler":
+        return ReplyKeyboardMarkup([["🔗 получить ссылку", "🆘 помощь"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+    elif role == "finder":
+        return ReplyKeyboardMarkup([["🆘 помощь"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+    else:  # executor или None
+        return ReplyKeyboardMarkup([["👤 профиль", "📋 выполнить задание"], ["📥 мои задания", "💸 вывести"], ["🔄 сменить вакансию"]], resize_keyboard=True)
+
+def get_kb(uid, d):
+    role = d["u"].get(str(uid), {}).get("vac_role")
+    return main_kb(role)
+
+async def notify_admins_photo(d, file_id, caption, kb):
     from io import BytesIO
     try:
-        from telegram import Bot as TGBot
-        tg_file = await TGBot(WORKER_TOKEN).get_file(file_id)
+        tg_file = await Bot(TOKEN).get_file(file_id)
         buf = BytesIO(await tg_file.download_as_bytearray())
-        return buf
     except Exception as e:
-        log.warning(f"reupload: {e}")
-        return None
+        log.warning(f"download: {e}")
+        await notify_admins_text(d, caption)
+        return
+    for v in d["u"].values():
+        if v.get("role") == "employer":
+            try:
+                buf.seek(0)
+                await Bot(ADMIN_TOKEN).send_photo(v["id"], buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+            except Exception as e:
+                log.warning(e)
 
-async def notify_worker(wid, text):
-    try:
-        await Bot(WORKER_TOKEN).send_message(wid, text)
-    except Exception as e:
-        log.warning(e)
+async def notify_admins_text(d, text, kb=None):
+    bot = Bot(ADMIN_TOKEN)
+    for v in d["u"].values():
+        if v.get("role") == "employer":
+            try:
+                await bot.send_message(v["id"], text, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+            except Exception as e:
+                log.warning(e)
 
 
-# ── старт ──────────────────────────────────────────────────────────────────────
+# ── старт / профиль ────────────────────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
     if str(uid) not in d["u"]:
-        d["u"][str(uid)] = {"role": "employer", "name": update.effective_user.full_name, "id": uid}
+        d["u"][str(uid)] = {"role": "worker", "name": update.effective_user.full_name, "username": update.effective_user.username or "", "id": uid, "vacancy": None}
         save(d)
-    await update.message.reply_text("админ", reply_markup=main_kb())
-
-
-# ── платформы ──────────────────────────────────────────────────────────────────
-
-async def platforms_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    txt = "платформы:\n" + "\n".join(f"· {p}" for p in d["platforms"]) if d["platforms"] else "платформ нет"
-    kb = [["➕ добавить", "🗑 удалить"], ["◀️ назад"]]
-    await update.message.reply_text(txt, reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-
-async def add_pl_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["pl_step"] = "add"
-    await update.message.reply_text("название:")
-
-async def add_pl_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    name = update.message.text.strip()
-    ctx.user_data.pop("pl_step", None)
-    if name not in d["platforms"]:
-        d["platforms"].append(name)
+    u = d["u"][str(uid)]
+    # если вакансия есть но нет роли — сбрасываем (старые данные)
+    if u.get("vacancy") and not u.get("vac_role"):
+        u["vacancy"] = None
         save(d)
-        await update.message.reply_text(f"добавил: {name}", reply_markup=main_kb())
-    else:
-        await update.message.reply_text("уже есть", reply_markup=main_kb())
-
-async def del_pl_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    if not d["platforms"]:
-        await update.message.reply_text("нечего удалять", reply_markup=main_kb())
+    if not u.get("vacancy"):
+        await _show_vacancy_select(update.message, d, first=True)
         return
-    kb = [[InlineKeyboardButton(p, callback_data=f"dp_{p}")] for p in d["platforms"]]
-    await update.message.reply_text("какую?", reply_markup=InlineKeyboardMarkup(kb))
+    role = u.get("vac_role")
+    await update.message.reply_text("привет 👋", reply_markup=main_kb(role))
 
-async def del_pl_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def _show_vacancy_select(msg, d, first=False):
+    intro = "привет 👋\n\nдля начала выбери вакансию:" if first else "выбери вакансию:"
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await msg.reply_text(intro, reply_markup=InlineKeyboardMarkup(kb))
+
+VAC_DESCRIPTIONS = {
+    "1": (
+        "💼 Исполнитель\n\n"
+        "Ты через бот берёшь задание на любую платформу, выполняешь и получаешь оплату.\n\n"
+        "После подтверждения вакансии тебе станут доступны задания."
+    ),
+    "2": (
+        "💼 Траффер\n\n"
+        "Твоя задача — приглашать людей из сферы отзывов, которые будут активничать.\n\n"
+        "Для тебя выдаётся спец ссылка, по ней ты приглашаешь людей.\n"
+        "Оплата производится когда захочешь.\n\n"
+        "По всем вопросам: @XA1HS"
+    ),
+    "3": (
+        "💼 Поиск заказчиков\n\n"
+        "Заказчик — человек, которому нужны отзывы (повысить рейтинг).\n\n"
+        "Как искать:\n"
+        "1. Заходишь на платформу (2ГИС, Яндекс, Google), вбиваешь сферу, звонишь и говоришь: \"Здравствуйте, помогаю в поднятии рейтинга. Интересно узнать подробнее?\"\n"
+        "2. Пишешь в мессенджер: Добрый день! Мы помогаем бизнесу становиться заметнее через работу с отзывами...\n\n"
+        "Если соглашаются — скидывай контакт @XA1HS\n\n"
+        "Заработок: от 100 до 13 000 руб за одного заказчика.\n\n"
+        "Платформы для поиска: 2ГИС, Яндекс, Google, Авито, ВК, Юла, ЦИАН, HH.ru, WhatsApp\n\n"
+        "Сферы: автосервис, парикмахерская, гостиницы, клининг, ремонт техники, здоровье, мебель, съём квартир\n\n"
+        "Если заказчик задаёт вопросы — скрин в @XA1HS"
+    ),
+}
+
+async def select_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    d = db()
-    name = q.data[3:]
-    if name in d["platforms"]:
-        d["platforms"].remove(name)
-        save(d)
-    await q.edit_message_text(f"удалил: {name}")
-
-
-# ── создание задания ───────────────────────────────────────────────────────────
-
-async def create_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    if not d["platforms"]:
-        await update.message.reply_text("сначала добавь платформы", reply_markup=main_kb())
+    vid = q.data[7:]
+    v = VACANCIES.get(vid)
+    if not v:
+        await q.edit_message_text("не найдено")
         return
-    ctx.user_data.clear()
-    ctx.user_data["step"] = "pick_platform"
-    kb = [[InlineKeyboardButton(p, callback_data=f"cp_{p}")] for p in d["platforms"]]
-    await update.message.reply_text("платформа:", reply_markup=InlineKeyboardMarkup(kb))
+    desc = VAC_DESCRIPTIONS.get(vid, v["title"])
+    kb = [[InlineKeyboardButton("✅ подтвердить", callback_data=f"confirvac_{vid}"),
+           InlineKeyboardButton("◀️ назад", callback_data="back_selvac")]]
+    await q.edit_message_text(desc, reply_markup=InlineKeyboardMarkup(kb))
 
-async def pl_picked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["pl"] = q.data[3:]
-    ctx.user_data["step"] = "title"
-    await q.edit_message_text(f"{ctx.user_data['pl']}\n\nссылка / название объекта:")
-
-async def type_picked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["type"] = q.data[3:]  # free или fixed
-    if ctx.user_data["type"] == "fixed":
-        ctx.user_data["step"] = "review_text"
-        await q.edit_message_text("введи готовый текст отзыва:")
-    else:
-        await _save_task(q, ctx)
-
-async def _save_task(q_or_msg, ctx, from_msg=False):
-    d = db()
-    existing = [int(k) for k in d["t"].keys() if k.isdigit()]
-    tid = str(max(existing) + 1 if existing else 1)
-    d["n"] = int(tid)
-    eid = q_or_msg.from_user.id if not from_msg else q_or_msg.from_user.id
-    d["t"][tid] = {
-        "id": tid, "platform": ctx.user_data["pl"],
-        "title": ctx.user_data["t"], "desc": ctx.user_data["d"],
-        "city": ctx.user_data.get("city", ""), "theme": ctx.user_data.get("theme", ""),
-        "price": ctx.user_data.get("price", "0"),
-        "dl": ctx.user_data["dl"],
-        "limit": ctx.user_data.get("limit", 1),
-        "workers": [],
-        "type": ctx.user_data.get("type", "free"),
-        "review_text": ctx.user_data.get("review_text"),
-        "eid": eid, "wid": None, "status": "open",
-        "ts": datetime.now().strftime("%d.%m %H:%M"), "result": None
-    }
-    save(d)
-    ctx.user_data.clear()
-    txt = f"#{tid} добавлено [{d['t'][tid]['platform']}]"
-    if from_msg:
-        await q_or_msg.reply_text(txt, reply_markup=main_kb())
-    else:
-        await q_or_msg.edit_message_text(txt)
-
-async def on_create_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    step = ctx.user_data.get("step")
-    txt = update.message.text.strip()
-    if step == "title":
-        ctx.user_data["t"] = txt
-        ctx.user_data["step"] = "city"
-        await update.message.reply_text("город:")
-    elif step == "city":
-        ctx.user_data["city"] = txt
-        ctx.user_data["step"] = "theme"
-        await update.message.reply_text("тематика:")
-    elif step == "theme":
-        ctx.user_data["theme"] = txt
-        ctx.user_data["step"] = "price"
-        await update.message.reply_text("цена (руб):")
-    elif step == "price":
-        ctx.user_data["price"] = txt
-        ctx.user_data["step"] = "desc"
-        await update.message.reply_text("инструкция для рабочего:")
-    elif step == "desc":
-        ctx.user_data["d"] = txt
-        ctx.user_data["step"] = "dl"
-        await update.message.reply_text("дедлайн (или -):")
-    elif step == "dl":
-        ctx.user_data["dl"] = "—" if txt == "-" else txt
-        ctx.user_data["step"] = "limit"
-        await update.message.reply_text("лимит исполнителей (число):")
-    elif step == "limit":
-        ctx.user_data["limit"] = int(txt) if txt.isdigit() else 1
-        ctx.user_data["step"] = "pick_type"
-        kb = [[InlineKeyboardButton("📝 рабочий сам пишет", callback_data="tp_free"),
-               InlineKeyboardButton("📋 готовый текст", callback_data="tp_fixed")]]
-        await update.message.reply_text("тип задания:", reply_markup=InlineKeyboardMarkup(kb))
-    elif step == "review_text":
-        ctx.user_data["review_text"] = txt
-        await _save_task(update.message, ctx, from_msg=True)
-    else:
-        return False
-    return True
-
-
-# ── список заданий ─────────────────────────────────────────────────────────────
-
-async def all_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    d = db()
-    tasks = [(k, v) for k, v in d["t"].items() if v["eid"] == uid]
-    if not tasks:
-        await update.message.reply_text("заданий нет")
-        return
-    icons = {"open": "🟡", "paused": "⏸", "active": "🔵", "review_check": "🔍", "done": "🟠", "closed": "✅"}
-    for tid, t in tasks:
-        wname = d["u"].get(str(t["wid"]), {}).get("name", "—") if t["wid"] else "—"
-        icon = icons.get(t["status"], "?")
-        ttype = "📋" if t.get("type") == "fixed" else "📝"
-        txt = f"{icon} #{tid} {ttype} [{t['platform']}]\n{t['title']}\nисполнитель: {wname}"
-        btns = []
-        if t["status"] == "open":
-            btns = [InlineKeyboardButton("⏸ пауза", callback_data=f"pause_{tid}"),
-                    InlineKeyboardButton("🗑 удалить", callback_data=f"del_{tid}")]
-        elif t["status"] == "paused":
-            btns = [InlineKeyboardButton("▶️ возобновить", callback_data=f"resume_{tid}"),
-                    InlineKeyboardButton("🗑 удалить", callback_data=f"del_{tid}")]
-        else:
-            btns = [InlineKeyboardButton("🗑 удалить", callback_data=f"del_{tid}")]
-        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup([btns]) if btns else None)
-
-async def pause_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    d = db()
-    tid = q.data[6:]
-    t = d["t"].get(tid)
-    if t and t["status"] == "open":
-        t["status"] = "paused"
-        save(d)
-        await q.edit_message_text(f"⏸ #{tid} на паузе")
-
-async def resume_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    d = db()
-    tid = q.data[7:]
-    t = d["t"].get(tid)
-    if t and t["status"] == "paused":
-        t["status"] = "open"
-        save(d)
-        await q.edit_message_text(f"▶️ #{tid} возобновлено")
-
-async def del_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    d = db()
-    tid = q.data[4:]
-    if tid in d["t"]:
-        del d["t"][tid]
-        save(d)
-        await q.edit_message_text(f"🗑 #{tid} удалено")
-
-
-# ── проверка ───────────────────────────────────────────────────────────────────
-
-async def check_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    d = db()
-    accs = sum(1 for ak, ap in d["apps"].items() if ap.get("status") == "checking" and d["t"].get(str(ap.get("tid")), {}).get("eid") == uid)
-    txts = sum(1 for t in d["t"].values() if t.get("status") == "review_check" and t.get("eid") == uid)
-    revs = sum(1 for t in d["t"].values() if t.get("status") == "done" and t.get("eid") == uid)
-    total = accs + txts + revs
-    if total == 0:
-        await update.message.reply_text("нечего проверять")
-        return
-    kb = []
-    if accs: kb.append([InlineKeyboardButton(f"👤 аккаунты ({accs})", callback_data="chk_acc")])
-    if txts: kb.append([InlineKeyboardButton(f"📝 тексты отзывов ({txts})", callback_data="chk_txt")])
-    if revs: kb.append([InlineKeyboardButton(f"📸 скриншоты ({revs})", callback_data="chk_rev")])
-    await update.message.reply_text("что проверяем?", reply_markup=InlineKeyboardMarkup(kb))
-
-async def check_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def confirm_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    section = q.data[4:]  # acc / txt / rev
-    d = db()
-    await q.edit_message_reply_markup(reply_markup=None)
-
-    if section == "acc":
-        sent = False
-        for app_key, app in d["apps"].items():
-            if app.get("status") != "checking":
-                continue
-            t = d["t"].get(str(app.get("tid")), {})
-            if t.get("eid") != uid:
-                continue
-            wname = d["u"].get(str(app["uid"]), {}).get("name", str(app["uid"]))
-            username = d["u"].get(str(app["uid"]), {}).get("username", "")
-            uinfo = f"@{username}" if username else wname
-            caption = f"👤 аккаунт [{t.get('platform','')}]\nрабочий: {uinfo}"
-            kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"acc_ok|{app_key}"),
-                   InlineKeyboardButton("❌ отказать", callback_data=f"acc_no|{app_key}")]]
-            buf = await reupload_photo(app["file_id"])
-            try:
-                if buf:
-                    await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-                else:
-                    await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-                sent = True
-            except Exception as e:
-                log.warning(e)
-        if not sent:
-            await q.message.reply_text("пусто")
-
-    elif section == "txt":
-        sent = False
-        for tid, t in d["t"].items():
-            if t.get("status") != "review_check" or t.get("eid") != uid:
-                continue
-            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-            username = d["u"].get(str(t["wid"]), {}).get("username", "")
-            uinfo = f"@{username}" if username else wname
-            txt = f"📝 текст отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}\n\n{t.get('draft','')}"
-            kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"txt_ok|{tid}"),
-                   InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
-            await q.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-            sent = True
-        if not sent:
-            await q.message.reply_text("пусто")
-
-    elif section == "rev":
-        sent = False
-        for tid, t in d["t"].items():
-            if t.get("status") != "done" or t.get("eid") != uid:
-                continue
-            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-            username = d["u"].get(str(t["wid"]), {}).get("username", "")
-            uinfo = f"@{username}" if username else wname
-            caption = f"📸 скриншот отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}"
-            kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
-                   InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
-            buf = await reupload_photo(t["result"])
-            try:
-                if buf:
-                    await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-                else:
-                    await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-                sent = True
-            except Exception as e:
-                log.warning(e)
-        if not sent:
-            await q.message.reply_text("пусто")
-
-
-# одобрить аккаунт
-async def acc_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    app_key = q.data.split("|")[1]
-    d = db()
-    app = d["apps"].get(app_key)
-    if not app:
-        await q.edit_message_caption("не найдено")
+    vid = q.data[10:]
+    v = VACANCIES.get(vid)
+    if not v:
+        await q.edit_message_text("не найдено")
         return
-    app["status"] = "approved"
-    save(d)
-    wname = d["u"].get(str(app["uid"]), {}).get("name", "")
-    t = d["t"].get(str(app.get("tid")), {})
-    platform = t.get("platform", "")
-    try:
-        await q.edit_message_caption(f"✅ одобрено: {wname}")
-    except:
-        await q.edit_message_text(f"✅ одобрено: {wname}")
-    from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
-    tid = str(app.get("tid"))
-    kb = [[IKB("📥 взять задание", callback_data=f"take|{tid}|{t.get('platform','')}|0")]]
-    try:
-        await Bot(WORKER_TOKEN).send_message(
-            app["uid"],
-            f"✅ аккаунт одобрен!\n\n#{tid} {t.get('title','')}\n\nнажми кнопку чтобы взять задание:",
-            reply_markup=IKM(kb)
-        )
-    except Exception as e:
-        log.warning(e)
-
-# отказать аккаунт
-async def acc_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["rej_acc"] = q.data.split("|")[1]
-    try:
-        await q.edit_message_caption("причина отказа:")
-    except:
-        await q.edit_message_text("причина отказа:")
-    return REJECT_ACC
-
-async def acc_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    app_key = ctx.user_data.pop("rej_acc")
-    reason = update.message.text.strip()
     d = db()
-    app = d["apps"].get(app_key)
-    if not app:
-        await update.message.reply_text("не найдено", reply_markup=main_kb())
-        return ConversationHandler.END
-    app["status"] = "rejected"
-    app["reason"] = reason
+    d["u"][str(uid)]["vacancy"] = {"id": vid, "title": v["title"]}
+    d["u"][str(uid)]["vac_role"] = v["role"]
     save(d)
-    await update.message.reply_text("отказ отправлен", reply_markup=main_kb())
-    await notify_worker(app["uid"], f"❌ аккаунт отклонён\nпричина: {reason}")
-    return ConversationHandler.END
+    await q.edit_message_text(f"✅ вакансия подтверждена: {v['title']}")
+    await q.message.reply_text("готово 👇", reply_markup=get_kb(uid, d))
 
-# одобрить текст отзыва
-async def txt_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def change_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await q.message.reply_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def back_selvac(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+    await q.edit_message_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    d = db()
+    done = sum(1 for t in d["t"].values() if t.get("wid") == uid and t.get("status") == "closed")
+    active = sum(1 for t in d["t"].values() if t.get("wid") == uid and t.get("status") == "active")
+    balance = d["u"][str(uid)].get("balance", 0)
+    await update.message.reply_text(f"👤 {d['u'][str(uid)]['name']}\n\nв работе: {active}\nвыполнено: {done}\n💰 баланс: {balance} руб", reply_markup=main_kb())
+
+
+# ── каталог ────────────────────────────────────────────────────────────────────
+
+async def catalog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    d = db()
+    u = d["u"].get(str(uid), {})
+    if not u.get("vacancy"):
+        await _show_vacancy_select(update.message, d, first=True)
+        return
+    if u.get("vac_role") != "executor":
+        await update.message.reply_text("задания доступны только для исполнителей", reply_markup=main_kb(u.get("vac_role")))
+        return
+    platforms = list({v["platform"] for v in d["t"].values() if v["status"] == "open"})
+    if not platforms:
+        await update.message.reply_text("заданий пока нет")
+        return
+    kb = [[InlineKeyboardButton(p, callback_data=f"pl_{p}")] for p in platforms]
+    await update.message.reply_text("выбери платформу:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def show_platform(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    platform = q.data[3:]
+    await _show_task(q, q.from_user.id, platform, 0)
+
+async def skip_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, platform, idx = q.data.split("|")
+    await _show_task(q, q.from_user.id, platform, int(idx))
+
+async def back_cat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = db()
+    platforms = list({v["platform"] for v in d["t"].values() if v["status"] == "open"})
+    if not platforms:
+        await q.edit_message_text("заданий пока нет")
+        return
+    kb = [[InlineKeyboardButton(p, callback_data=f"pl_{p}")] for p in platforms]
+    await q.edit_message_text("выбери платформу:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def _show_task(q, uid, platform, idx):
+    d = db()
+    tasks = [(k, v) for k, v in d["t"].items() if v["platform"] == platform and v["status"] == "open"]
+    back = [[InlineKeyboardButton("◀️ платформы", callback_data="back_cat")]]
+    if not tasks or idx >= len(tasks):
+        await q.edit_message_text("больше заданий нет", reply_markup=InlineKeyboardMarkup(back))
+        return
+    tid, t = tasks[idx]
+    title = t.get("title") or t.get("t", "без названия")
+    city = t.get("city", "")
+    theme = t.get("theme", "")
+    price = t.get("price", "")
+    lines = [f"📌 {title}"]
+    if city: lines.append(f"📍 {city}")
+    if theme: lines.append(f"🏷 {theme}")
+    if price: lines.append(f"💰 {price} руб")
+    kb = [[
+        InlineKeyboardButton("✅ выполнить", callback_data=f"take|{tid}|{platform}|{idx}"),
+        InlineKeyboardButton("❌ отказаться", callback_data=f"skip|{platform}|{idx+1}")
+    ], [InlineKeyboardButton("◀️ платформы", callback_data="back_cat")]]
+    await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
+# ── взять задание ──────────────────────────────────────────────────────────────
+
+async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # убираем кнопки сразу
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    _, tid, platform, idx = q.data.split("|")
+    uid = q.from_user.id
+    d = db()
+    t = d["t"].get(tid)
+
+    if not t or t["status"] != "open":
+        await q.edit_message_text("задание уже недоступно")
+        return
+
+    app_key = f"{uid}_{tid}"
+    app = d["apps"].get(app_key, {})
+    status = app.get("status")
+
+    if status == "checking":
+        await q.edit_message_text("🔍 аккаунт уже на проверке, ожидай")
+        return
+    if status == "rejected":
+        ctx.user_data["check_tid"] = tid
+        await q.edit_message_text(f"❌ аккаунт отклонён\nпричина: {app.get('reason','')}\n\nскинь новый скриншот профиля:")
+        return
+    if status != "approved":
+        ctx.user_data["check_tid"] = tid
+        await q.edit_message_text("скинь скриншот своего профиля на этой платформе:")
+        return
+
+    # аккаунт одобрен — берём задание
+    t["wid"] = uid
+    save(d)
+
+    name = d["u"].get(str(uid), {}).get("name", str(uid))
+    await notify_admins_text(d, f"🔔 {name} взял #{tid} [{platform}] {t['title']}")
+
+    kb = [[InlineKeyboardButton("✅ готово", callback_data=f"done|{tid}")]]
+    await q.edit_message_text(f"📌 {t['title']}\n\n{t['desc']}", reply_markup=InlineKeyboardMarkup(kb))
+
+
+# ── скриншот аккаунта ──────────────────────────────────────────────────────────
+
+async def check_acc_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("нужен скриншот, не текст")
+        return SEND_ACCOUNT
+
+    uid = update.effective_user.id
+    tid = ctx.user_data.pop("check_tid", None)
+    if not tid:
+        await update.message.reply_text("что-то пошло не так", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    file_id = update.message.photo[-1].file_id
+    d = db()
+    t = d["t"].get(tid, {})
+
+    app_key = f"{uid}_{tid}"
+    d["apps"][app_key] = {"uid": uid, "tid": tid, "file_id": file_id, "status": "checking"}
+    save(d)
+
+    await update.message.reply_text("скриншот отправлен на проверку, ожидай ✅", reply_markup=main_kb())
+
+    name = d["u"].get(str(uid), {}).get("name", str(uid))
+    caption = f"🔍 проверка аккаунта\n\nзадание: #{tid} [{t.get('platform','')}] {t.get('title','')}\nрабочий: {name}"
+    kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"acc_ok|{app_key}"),
+           InlineKeyboardButton("❌ отказать", callback_data=f"acc_no|{app_key}")]]
+    await notify_admins_photo(d, file_id, caption, kb)
+
+
+# ── кнопка готово ──────────────────────────────────────────────────────────────
+
+async def task_done_btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
     tid = q.data.split("|")[1]
+    uid = q.from_user.id
     d = db()
     t = d["t"].get(tid)
     if not t:
         await q.edit_message_text("не найдено")
         return
-    save(d)
-    await q.edit_message_text(f"✅ текст одобрен #{tid}")
-    from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
-    kb = [[IKB("📸 отправить скриншот", callback_data=f"submit_{tid}")]]
-    try:
-        await Bot(WORKER_TOKEN).send_message(
-            t["wid"],
-            f"✅ текст одобрен!\n\nопубликуй отзыв и нажми кнопку:",
-            reply_markup=IKM(kb)
-        )
-    except Exception as e:
-        log.warning(e)
 
-# отклонить текст отзыва
-async def txt_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if t.get("type") == "fixed":
+        # готовый текст — показываем и просим скриншот
+        ctx.user_data["submit_tid"] = tid
+        kb = [[InlineKeyboardButton("📸 отправить скриншот", callback_data=f"submit_{tid}")]]
+        await q.edit_message_text(
+            f"скопируй и опубликуй отзыв:\n\n{t['review_text']}\n\nпосле публикации нажми кнопку:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    else:
+        # рабочий сам пишет — сначала текст на проверку
+        ctx.user_data["write_tid"] = tid
+        await q.edit_message_text("напиши текст своего отзыва — отправлю на проверку:")
+        return WRITE_REVIEW
+
+
+# ── рабочий пишет текст отзыва ────────────────────────────────────────────────
+
+async def review_text_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    tid = ctx.user_data.pop("write_tid", None)
+    if not tid:
+        await update.message.reply_text("что-то пошло не так", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    review_txt = update.message.text.strip()
+    d = db()
+    t = d["t"].get(tid)
+    if not t:
+        await update.message.reply_text("задание не найдено", reply_markup=main_kb())
+        return ConversationHandler.END
+
+    t["draft"] = review_txt
+    t["status"] = "review_check"
+    save(d)
+
+    await update.message.reply_text("текст отправлен на проверку, ожидай ✅", reply_markup=main_kb())
+
+    name = d["u"].get(str(uid), {}).get("name", str(uid))
+    kb = [[InlineKeyboardButton("✅ одобрить текст", callback_data=f"txt_ok|{tid}"),
+           InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
+    await notify_admins_text(d,
+        f"📝 текст отзыва на проверке\n\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {name}\n\n{review_txt}",
+        kb
+    )
+    return ConversationHandler.END
+
+
+# ── сдать скриншот ─────────────────────────────────────────────────────────────
+
+async def submit_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    ctx.user_data["rej_txt"] = q.data.split("|")[1]
-    await q.edit_message_text("причина отклонения:")
-    return REJECT_TXT
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    ctx.user_data["submit_tid"] = q.data[7:]
+    ctx.user_data["step"] = "submit_photo"
+    await q.message.reply_text("скинь скриншот опубликованного отзыва:")
 
-async def txt_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    tid = ctx.user_data.pop("rej_txt")
-    reason = update.message.text.strip()
+async def submit_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("нужен скриншот, не текст")
+        return
+
+    uid = update.effective_user.id
+    tid = ctx.user_data.pop("submit_tid", None)
+    ctx.user_data.pop("step", None)
     d = db()
     t = d["t"].get(tid)
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
         return ConversationHandler.END
-    t.pop("draft", None)
+
+    file_id = update.message.photo[-1].file_id
+    t["status"] = "done"
+    t["result"] = file_id
     save(d)
-    await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
-    await notify_worker(t["wid"], f"❌ текст отзыва отклонён\nпричина: {reason}\n\nперепиши и отправь снова")
-    return ConversationHandler.END
 
-# принять скриншот
-async def rev_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    tid = q.data.split("|")[1]
-    d = db()
-    t = d["t"].get(tid)
-    if not t:
-        await q.edit_message_caption("не найдено")
-        return
-    t["status"] = "closed"
-    price = int(t.get("price", 0) or 0)
-    wid = str(t["wid"])
-    if wid in d["u"]:
-        d["u"][wid]["balance"] = d["u"][wid].get("balance", 0) + price
-    save(d)
-    try:
-        await q.edit_message_caption(f"✅ #{tid} принят")
-    except:
-        await q.edit_message_text(f"✅ #{tid} принят")
-    await notify_worker(t["wid"], f"✅ отзыв #{tid} принят 🎉\n\n+{price} руб на баланс 💰")
+    await update.message.reply_text("сдано, ждём проверки 👍", reply_markup=main_kb())
 
-# отклонить скриншот
-async def rev_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["rej_rev"] = q.data.split("|")[1]
-    try:
-        await q.edit_message_caption("причина отклонения:")
-    except:
-        await q.edit_message_text("причина отклонения:")
-    return REJECT_REV
+    name = d["u"].get(str(uid), {}).get("name", str(uid))
+    caption = f"📸 скриншот отзыва\n\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {name}"
+    kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
+           InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
+    await notify_admins_photo(d, file_id, caption, kb)
 
-async def rev_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    tid = ctx.user_data.pop("rej_rev")
-    reason = update.message.text.strip()
-    d = db()
-    t = d["t"].get(tid)
-    if not t:
-        await update.message.reply_text("не найдено", reply_markup=main_kb())
-        return ConversationHandler.END
-    save(d)
-    await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
-    from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
-    kb = [[IKB("📸 отправить скриншот заново", callback_data=f"submit_{tid}")]]
-    try:
-        await Bot(WORKER_TOKEN).send_message(
-            t["wid"],
-            f"❌ скриншот #{tid} отклонён\nпричина: {reason}\n\nисправь и отправь снова:",
-            reply_markup=IKM(kb)
-        )
-    except Exception as e:
-        log.warning(e)
-    return ConversationHandler.END
-
-
-async def withdraw_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    parts = q.data.split("|")
-    wid = int(parts[1])
-    amount = int(parts[2])
-    d = db()
-    u = d["u"].get(str(wid), {})
-    u["balance"] = max(0, u.get("balance", 0) - amount)
-    save(d)
-    try:
-        await q.edit_message_reply_markup(reply_markup=None)
-        await q.message.reply_text(f"✅ выплата подтверждена, -{amount} руб с баланса")
-    except: pass
-    try:
-        await Bot(WORKER_TOKEN).send_message(wid, f"✅ заявка на вывод {amount} руб подтверждена\n\nожидай оплаты 💸")
-    except Exception as e:
-        log.warning(e)
-
-async def withdraw_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["wno"] = q.data[5:]  # wid|amount
-    try:
-        await q.edit_message_reply_markup(reply_markup=None)
-    except: pass
-    await q.message.reply_text("причина отказа в выводе:")
-    return 99
-
-async def withdraw_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    data = ctx.user_data.pop("wno", "")
-    parts = data.split("|")
-    wid = int(parts[0])
-    reason = update.message.text.strip()
-    await update.message.reply_text("отказ отправлен", reply_markup=main_kb())
-    try:
-        await Bot(WORKER_TOKEN).send_message(wid, f"❌ заявка на вывод отклонена\nпричина: {reason}")
-    except Exception as e:
-        log.warning(e)
-    return ConversationHandler.END
-
-
-# ── вакансии ───────────────────────────────────────────────────────────────────
-
-async def vacancies_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    vacs = d.get("vacs", {})
-    txt = "💼 вакансии:\n" + "\n".join(f"· {v['title']}" for v in vacs.values()) if vacs else "вакансий нет"
-    kb = [["➕ добавить вакансию", "🗑 удалить вакансию"], ["◀️ назад"]]
-    await update.message.reply_text(txt, reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-
-async def add_vac_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["vac_step"] = "title"
-    await update.message.reply_text("название вакансии:")
-
-async def on_vac_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    step = ctx.user_data.get("vac_step")
-    txt = update.message.text.strip()
-    if step == "title":
-        ctx.user_data["vac_title"] = txt
-        ctx.user_data["vac_step"] = "desc"
-        await update.message.reply_text("описание:")
-    elif step == "desc":
-        ctx.user_data["vac_desc"] = txt
-        ctx.user_data["vac_step"] = "price"
-        await update.message.reply_text("оплата:")
-    elif step == "price":
-        ctx.user_data["vac_price"] = txt
-        ctx.user_data["vac_step"] = "contact"
-        await update.message.reply_text("юзернейм для связи (@username):")
-    elif step == "contact":
-        d = db()
-        if "vacs" not in d:
-            d["vacs"] = {}
-        existing = [int(k) for k in d["vacs"].keys() if k.isdigit()]
-        vn = str(max(existing) + 1 if existing else 1)
-        d["vacs"][vn] = {
-            "title": ctx.user_data.pop("vac_title"),
-            "desc": ctx.user_data.pop("vac_desc"),
-            "price": ctx.user_data.pop("vac_price"),
-            "contact": txt
-        }
-        ctx.user_data.pop("vac_step", None)
-        save(d)
-        await update.message.reply_text("вакансия добавлена", reply_markup=main_kb())
-
-async def del_vac_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    vacs = d.get("vacs", {})
-    if not vacs:
-        await update.message.reply_text("нечего удалять", reply_markup=main_kb())
-        return
-    kb = [[InlineKeyboardButton(v["title"], callback_data=f"dv_{k}")] for k, v in vacs.items()]
-    await update.message.reply_text("какую?", reply_markup=InlineKeyboardMarkup(kb))
-
-async def del_vac_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    vid = q.data[3:]
-    d = db()
-    if vid in d.get("vacs", {}):
-        del d["vacs"][vid]
-        save(d)
-    await q.edit_message_text("удалено")
-
-
-# ── штрафы ─────────────────────────────────────────────────────────────────────
-
-async def fine_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    workers = [(k, v) for k, v in d["u"].items() if v.get("role") == "worker"]
-    if not workers:
-        await update.message.reply_text("рабочих нет", reply_markup=main_kb())
-        return
-    kb = [[InlineKeyboardButton(
-        f"@{v.get('username', v.get('name', k))}",
-        callback_data=f"fine_{k}"
-    )] for k, v in workers]
-    await update.message.reply_text("выбери рабочего:", reply_markup=InlineKeyboardMarkup(kb))
-
-async def fine_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["fine_uid"] = q.data[5:]
-    ctx.user_data["fine_step"] = "amount"
-    await q.edit_message_text("сумма штрафа (руб):")
-
-async def on_fine_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    step = ctx.user_data.get("fine_step")
-    txt = update.message.text.strip()
-    if step == "amount":
-        if not txt.isdigit():
-            await update.message.reply_text("введи число")
-            return
-        ctx.user_data["fine_amount"] = int(txt)
-        ctx.user_data["fine_step"] = "reason"
-        await update.message.reply_text("причина штрафа:")
-    elif step == "reason":
-        wid = ctx.user_data.pop("fine_uid")
-        amount = ctx.user_data.pop("fine_amount")
-        ctx.user_data.pop("fine_step", None)
-        d = db()
-        u = d["u"].get(str(wid), {})
-        u["balance"] = max(0, u.get("balance", 0) - amount)
-        save(d)
-        wname = u.get("username") or u.get("name", wid)
-        await update.message.reply_text(f"⚡ штраф -{amount} руб применён к @{wname}", reply_markup=main_kb())
-        try:
-            await Bot(WORKER_TOKEN).send_message(int(wid), f"⚡ тебе выписан штраф -{amount} руб\nпричина: {txt}\n\nновый баланс: {u['balance']} руб")
-        except Exception as e:
-            log.warning(e)
-
-
-# ── штрафы ─────────────────────────────────────────────────────────────────────
-
-FINE_AMOUNT, FINE_REASON = range(10, 12)
-
-async def fines_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    d = db()
-    # рабочие у которых есть выполненные задания
-    wids = set()
-    for t in d["t"].values():
-        if t.get("status") in ("closed",) and t.get("wid"):
-            wids.add(str(t["wid"]))
-    if not wids:
-        await update.message.reply_text("нет рабочих с выполненными заданиями")
-        return
-    kb = []
-    for wid in wids:
-        u = d["u"].get(wid, {})
-        username = u.get("username", "")
-        label = f"@{username}" if username else u.get("name", wid)
-        balance = u.get("balance", 0)
-        kb.append([InlineKeyboardButton(f"{label} · {balance} руб", callback_data=f"fine_{wid}")])
-    await update.message.reply_text("выбери рабочего:", reply_markup=InlineKeyboardMarkup(kb))
-
-async def fine_pick_worker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    wid = q.data[5:]
-    ctx.user_data["fine_wid"] = wid
-    d = db()
-    u = d["u"].get(wid, {})
-    username = u.get("username", "")
-    name = f"@{username}" if username else u.get("name", wid)
-    balance = u.get("balance", 0)
-    await q.edit_message_text(f"рабочий: {name}\nбаланс: {balance} руб\n\nсумма штрафа:")
-    return FINE_AMOUNT
-
-async def fine_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text.strip()
-    if not txt.isdigit():
-        await update.message.reply_text("введи число:")
-        return FINE_AMOUNT
-    ctx.user_data["fine_amount"] = int(txt)
-    await update.message.reply_text("причина штрафа:")
-    return FINE_REASON
-
-async def fine_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    wid = ctx.user_data.pop("fine_wid")
-    amount = ctx.user_data.pop("fine_amount")
-    reason = update.message.text.strip()
-    d = db()
-    u = d["u"].get(wid, {})
-    old_balance = u.get("balance", 0)
-    u["balance"] = max(0, old_balance - amount)
-    save(d)
-    username = u.get("username", "")
-    name = f"@{username}" if username else u.get("name", wid)
-    await update.message.reply_text(f"⚡️ штраф применён\n{name}: -{amount} руб\nпричина: {reason}", reply_markup=main_kb())
-    try:
-        await Bot(WORKER_TOKEN).send_message(int(wid), f"⚡️ тебе выписан штраф -{amount} руб\nпричина: {reason}\n\nновый баланс: {u['balance']} руб")
-    except Exception as e:
-        log.warning(e)
-    return ConversationHandler.END
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text("ок", reply_markup=main_kb())
     return ConversationHandler.END
 
+
+# ── вывод средств ──────────────────────────────────────────────────────────────
+
+async def withdraw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    d = db()
+    balance = d["u"].get(str(uid), {}).get("balance", 0)
+    if balance < 300:
+        await update.message.reply_text(f"минимальная сумма вывода 300 руб\nтвой баланс: {balance} руб", reply_markup=main_kb())
+        return
+    ctx.user_data["withdraw_step"] = "phone"
+    ctx.user_data["withdraw_amount"] = balance
+    await update.message.reply_text(f"баланс: {balance} руб\n\nукажи номер телефона или карты:")
+
+async def on_withdraw_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    step = ctx.user_data.get("withdraw_step")
+    txt = update.message.text.strip()
+    if step == "phone":
+        ctx.user_data["withdraw_phone"] = txt
+        ctx.user_data["withdraw_step"] = "bank"
+        await update.message.reply_text("укажи банк:")
+    elif step == "bank":
+        uid = update.effective_user.id
+        d = db()
+        u = d["u"].get(str(uid), {})
+        amount = ctx.user_data.pop("withdraw_amount", 0)
+        phone = ctx.user_data.pop("withdraw_phone", "")
+        ctx.user_data.pop("withdraw_step", None)
+        name = u.get("name", str(uid))
+        await update.message.reply_text("заявка на вывод отправлена, ожидай 💸", reply_markup=main_kb())
+        kb = [[
+            InlineKeyboardButton("✅ подтвердить", callback_data=f"wok|{uid}|{amount}"),
+            InlineKeyboardButton("❌ отказать", callback_data=f"wno|{uid}|{amount}")
+        ]]
+        await notify_admins_text(d,
+            f"💸 заявка на вывод\n\nрабочий: {name}\nсумма: {amount} руб\nтелефон/карта: {phone}\nбанк: {txt}",
+            kb
+        )
+
+
+# ── мои задания ────────────────────────────────────────────────────────────────
+
+async def my_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    d = db()
+    tasks = [(k, v) for k, v in d["t"].items() if v.get("wid") == uid and v["status"] not in ("closed",)]
+    if not tasks:
+        await update.message.reply_text("активных заданий нет", reply_markup=main_kb())
+        return
+    icons = {"active": "🔵", "done": "🟠", "review_check": "🔍"}
+    for tid, t in tasks:
+        icon = icons.get(t["status"], "?")
+        txt = f"{icon} #{tid} [{t['platform']}]\n{t['title']}"
+        kb = [[InlineKeyboardButton("❌ отказ от задания", callback_data=f"canceltask|{tid}")]]
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+
+async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    tid = q.data.split("|")[1]
+    uid = q.from_user.id
+    d = db()
+    t = d["t"].get(tid)
+    if not t or t.get("wid") != uid:
+        await q.answer("не найдено")
+        return
+    save(d)
+    await q.edit_message_text(f"#{tid} возвращено в каталог")
+    name = d["u"].get(str(uid), {}).get("name", str(uid))
+    await notify_admins_text(d, f"↩ {name} отказался от задания #{tid} [{t['platform']}] {t['title']}")
+
+
+# ── вакансии ───────────────────────────────────────────────────────────────────
+
+async def vacancies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    d = db()
+    vacs = d.get("vacs", {})
+    if not vacs:
+        await update.message.reply_text("вакансий пока нет", reply_markup=main_kb())
+        return
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"vac_{k}")] for k, v in vacs.items()]
+    await update.message.reply_text("💼 вакансии:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def show_vacancy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    vid = q.data[4:]
+    d = db()
+    v = d.get("vacs", {}).get(vid)
+    if not v:
+        await q.edit_message_text("не найдено")
+        return
+    txt = f"💼 {v['title']}\n\n{v['desc']}\n\n💰 оплата: {v.get('price', '—')}\n\n👤 {v.get('contact', '—')}"
+    kb = [[InlineKeyboardButton("◀️ назад", callback_data="back_vac")]]
+    await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+
+async def back_vac(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = db()
+    vacs = d.get("vacs", {})
+    if not vacs:
+        await q.edit_message_text("вакансий пока нет")
+        return
+    kb = [[InlineKeyboardButton(v["title"], callback_data=f"vac_{k}")] for k, v in vacs.items()]
+    await q.edit_message_text("💼 вакансии:", reply_markup=InlineKeyboardMarkup(kb))
+
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ctx.user_data.get("fine_step"):
-        await on_fine_input(update, ctx)
-        return
-    if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "limit", "review_text"):
-        await on_create_input(update, ctx)
-        return
-    if ctx.user_data.get("pl_step") == "add":
-        await add_pl_input(update, ctx)
+    if ctx.user_data.get("step") == "submit_photo":
+        await submit_photo(update, ctx)
         return
     txt = update.message.text
-    if txt == "📋 задания": await all_tasks(update, ctx)
-    elif txt == "🔍 проверить": await check_menu(update, ctx)
-    elif txt == "🗂 платформы": await platforms_menu(update, ctx)
-    elif txt == "⚡ штрафы": await fine_start(update, ctx)
-    elif txt == "⚡️ штрафы": await fines_menu(update, ctx)
-    elif txt == "◀️ назад": await start(update, ctx)
-    elif txt == "➕ задание": await create_start(update, ctx)
-    elif txt == "➕ добавить": await add_pl_start(update, ctx)
-    elif txt == "🗑 удалить": await del_pl_start(update, ctx)
-    else: await update.message.reply_text("?", reply_markup=main_kb())
+    if ctx.user_data.get("withdraw_step"):
+        await on_withdraw_input(update, ctx)
+        return
+    uid = update.effective_user.id
+    d = db()
+    role = d["u"].get(str(uid), {}).get("vac_role")
+    if txt == "👤 профиль": await profile(update, ctx)
+    elif txt == "📋 выполнить задание": await catalog(update, ctx)
+    elif txt == "📥 мои задания": await my_tasks(update, ctx)
+    elif txt == "💸 вывести": await withdraw_start(update, ctx)
+    elif txt == "🆘 помощь":
+        await update.message.reply_text(f"👉 {HELP_URL}")
+    elif txt == "🔗 получить ссылку":
+        await update.message.reply_text(f"напиши мне, я дам тебе ссылку 👉 {HELP_URL}")
+    elif txt == "🔄 сменить вакансию":
+        d2 = db()
+        kb = [[InlineKeyboardButton(v["title"], callback_data=f"selvac_{k}")] for k, v in VACANCIES.items()]
+        await update.message.reply_text("выбери вакансию:", reply_markup=InlineKeyboardMarkup(kb))
+    else: await update.message.reply_text("?", reply_markup=main_kb(role))
 
 
 async def main():
@@ -755,48 +561,35 @@ async def main():
     app.add_handler(CommandHandler("start", start))
 
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(acc_no_start, pattern=r"^acc_no\|")],
-        states={REJECT_ACC: [MessageHandler(filters.TEXT & ~filters.COMMAND, acc_no_done)]},
-        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(rev_no_start, pattern=r"^rev_no\|")],
-        states={REJECT_REV: [MessageHandler(filters.TEXT & ~filters.COMMAND, rev_no_done)]},
-        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(txt_no_start, pattern=r"^txt_no\|")],
-        states={REJECT_TXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, txt_no_done)]},
-        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
+        entry_points=[CallbackQueryHandler(task_done_btn, pattern=r"^done\|")],
+        states={WRITE_REVIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, review_text_received)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False
     ))
 
-    app.add_handler(CallbackQueryHandler(pl_picked, pattern="^cp_"))
-    app.add_handler(CallbackQueryHandler(type_picked, pattern="^tp_"))
-    app.add_handler(CallbackQueryHandler(del_pl_done, pattern="^dp_"))
-    app.add_handler(CallbackQueryHandler(del_vac_done, pattern="^dv_"))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(withdraw_no_start, pattern=r"^wno\|")],
-        states={99: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_no_done)]},
-        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(fine_pick_worker, pattern="^fine_")],
-        states={
-            FINE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, fine_amount)],
-            FINE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, fine_reason)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)], per_message=False
-    ))
-    app.add_handler(CallbackQueryHandler(withdraw_ok, pattern=r"^wok\|"))
-    app.add_handler(CallbackQueryHandler(check_section, pattern="^chk_"))
-    app.add_handler(CallbackQueryHandler(fine_pick, pattern="^fine_"))
-    app.add_handler(CallbackQueryHandler(acc_ok, pattern=r"^acc_ok\|"))
-    app.add_handler(CallbackQueryHandler(txt_ok, pattern=r"^txt_ok\|"))
-    app.add_handler(CallbackQueryHandler(rev_ok, pattern=r"^rev_ok\|"))
-    app.add_handler(CallbackQueryHandler(pause_task, pattern="^pause_"))
-    app.add_handler(CallbackQueryHandler(resume_task, pattern="^resume_"))
-    app.add_handler(CallbackQueryHandler(del_task, pattern="^del_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CallbackQueryHandler(show_platform, pattern="^pl_"))
+    app.add_handler(CallbackQueryHandler(skip_task, pattern=r"^skip\|"))
+    app.add_handler(CallbackQueryHandler(take_task, pattern=r"^take\|"))
+    app.add_handler(CallbackQueryHandler(back_cat, pattern="^back_cat$"))
+    app.add_handler(CallbackQueryHandler(select_vacancy, pattern="^selvac_"))
+    app.add_handler(CallbackQueryHandler(confirm_vacancy, pattern="^confirvac_"))
+    app.add_handler(CallbackQueryHandler(back_selvac, pattern="^back_selvac$"))
+    app.add_handler(CallbackQueryHandler(change_vacancy, pattern="^change_vac$"))
+    app.add_handler(CallbackQueryHandler(show_vacancy, pattern="^vac_"))
+    app.add_handler(CallbackQueryHandler(back_vac, pattern="^back_vac$"))
+    app.add_handler(CallbackQueryHandler(cancel_task, pattern=r"^canceltask\|"))
+    async def msg_router(u, c):
+        if c.user_data.get("check_tid"):
+            await check_acc_photo(u, c)
+        elif c.user_data.get("step") == "submit_photo":
+            await submit_photo(u, c)
+        elif u.message and u.message.photo:
+            await u.message.reply_text("?")
+        else:
+            await on_text(u, c)
+
+    app.add_handler(CallbackQueryHandler(submit_start, pattern="^submit_"))
+    app.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), msg_router))
 
     await app.initialize()
     await app.start()
