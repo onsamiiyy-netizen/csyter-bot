@@ -415,7 +415,6 @@ async def txt_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not t:
         await q.edit_message_text("не найдено")
         return
-    t["status"] = "active"
     save(d)
     await q.edit_message_text(f"✅ текст одобрен #{tid}")
     from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
@@ -445,7 +444,6 @@ async def txt_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
         return ConversationHandler.END
-    t["status"] = "active"
     t.pop("draft", None)
     save(d)
     await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
@@ -493,7 +491,6 @@ async def rev_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
         return ConversationHandler.END
-    t["status"] = "active"
     save(d)
     await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
     from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
