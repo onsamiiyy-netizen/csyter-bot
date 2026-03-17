@@ -141,8 +141,6 @@ async def _save_task(q_or_msg, ctx, from_msg=False):
         "city": ctx.user_data.get("city", ""), "theme": ctx.user_data.get("theme", ""),
         "price": ctx.user_data.get("price", "0"),
         "dl": ctx.user_data["dl"],
-        "limit": ctx.user_data.get("limit", 1),
-        "workers": [],
         "type": ctx.user_data.get("type", "free"),
         "review_text": ctx.user_data.get("review_text"),
         "eid": eid, "wid": None, "status": "open",
@@ -181,10 +179,6 @@ async def on_create_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("дедлайн (или -):")
     elif step == "dl":
         ctx.user_data["dl"] = "—" if txt == "-" else txt
-        ctx.user_data["step"] = "limit"
-        await update.message.reply_text("лимит исполнителей (число):")
-    elif step == "limit":
-        ctx.user_data["limit"] = int(txt) if txt.isdigit() else 1
         ctx.user_data["step"] = "pick_type"
         kb = [[InlineKeyboardButton("📝 рабочий сам пишет", callback_data="tp_free"),
                InlineKeyboardButton("📋 готовый текст", callback_data="tp_fixed")]]
@@ -731,7 +725,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.user_data.get("fine_step"):
         await on_fine_input(update, ctx)
         return
-    if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "limit", "review_text"):
+    if ctx.user_data.get("step") in ("title", "city", "theme", "price", "desc", "dl", "review_text"):
         await on_create_input(update, ctx)
         return
     if ctx.user_data.get("pl_step") == "add":
