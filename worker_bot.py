@@ -13,12 +13,12 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 def db():
     if not os.path.exists(DB):
-        return {"u": {}, "t": {}, "n": 0, "platforms": [], "apps": {}}
+        return {"u": {}, "t": {}, "n": 0, "platforms": [], "apps": {}, "workers": {}}
     with open(DB, encoding="utf-8") as f:
         d = json.load(f)
-    for k in ("platforms", "apps"):
+    for k in ("platforms", "apps", "workers"):
         if k not in d:
-            d[k] = {} if k == "apps" else []
+            d[k] = {} if k in ("apps", "workers") else []
     return d
 
 def save(d):
@@ -166,10 +166,11 @@ async def back_selvac(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
-    done = sum(1 for t in d["t"].values() if t.get("wid") == uid and t.get("status") == "closed")
-    active = sum(1 for t in d["t"].values() if t.get("wid") == uid and t.get("status") == "active")
+    done = sum(1 for w in d["workers"].values() if w.get(str(uid), {}).get("status") == "closed")
+    active = sum(1 for w in d["workers"].values() if w.get(str(uid), {}).get("status") == "active")
     balance = d["u"][str(uid)].get("balance", 0)
-    await update.message.reply_text(f"👤 {d['u'][str(uid)]['name']}\n\nв работе: {active}\nвыполнено: {done}\n💰 баланс: {balance} руб", reply_markup=main_kb())
+    role = d["u"][str(uid)].get("vac_role")
+    await update.message.reply_text(f"👤 {d['u'][str(uid)]['name']}\n\nв работе: {active}\nвыполнено: {done}\n💰 баланс: {balance} руб", reply_markup=main_kb(role))
 
 
 # ── каталог ────────────────────────────────────────────────────────────────────
@@ -242,7 +243,6 @@ async def _show_task(q, uid, platform, idx):
 async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # убираем кнопки сразу
     try:
         await q.edit_message_reply_markup(reply_markup=None)
     except: pass
@@ -251,30 +251,35 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = db()
     t = d["t"].get(tid)
 
-    if not t or t["status"] != "open":
-        await q.edit_message_text("задание уже недоступно")
+    if not t or t["status"] not in ("open",):
+        await q.edit_message_text("задание недоступно")
         return
 
-    app_key = f"{uid}_{tid}"
-    app = d["apps"].get(app_key, {})
-    status = app.get("status")
+    # проверяем уже ли этот рабочий взял это задание
+    w = d["workers"].setdefault(tid, {})
+    my = w.get(str(uid), {})
+    my_status = my.get("status")
 
-    if status == "checking":
+    if my_status == "checking":
         await q.edit_message_text("🔍 аккаунт уже на проверке, ожидай")
         return
-    if status == "rejected":
+    if my_status == "rejected":
         ctx.user_data["check_tid"] = tid
-        await q.edit_message_text(f"❌ аккаунт отклонён\nпричина: {app.get('reason','')}\n\nскинь новый скриншот профиля:")
+        await q.edit_message_text(f"❌ аккаунт отклонён\nпричина: {my.get('reason','')}\n\nскинь новый скриншот профиля:")
         return
-    if status != "approved":
+    if my_status in ("active", "review_check", "done"):
+        await q.edit_message_text("ты уже взял это задание")
+        return
+
+    # аккаунт ещё не проверялся — просим скриншот
+    if my_status != "approved":
         ctx.user_data["check_tid"] = tid
         await q.edit_message_text("скинь скриншот своего профиля на этой платформе:")
         return
 
-    # аккаунт одобрен — берём задание
-    t["wid"] = uid
+    # аккаунт одобрен — выдаём задание
+    w[str(uid)] = {**my, "status": "active"}
     save(d)
-    log.info(f"TASK {tid} STATUS AFTER TAKE: {t['status']}")
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
     await notify_admins_text(d, f"🔔 {name} взял #{tid} [{platform}] {t['title']}")
@@ -288,26 +293,30 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def check_acc_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         await update.message.reply_text("нужен скриншот, не текст")
-        return SEND_ACCOUNT
+        return
 
     uid = update.effective_user.id
     tid = ctx.user_data.pop("check_tid", None)
     if not tid:
         await update.message.reply_text("что-то пошло не так", reply_markup=main_kb())
-        return ConversationHandler.END
+        return
 
     file_id = update.message.photo[-1].file_id
     d = db()
     t = d["t"].get(tid, {})
 
-    app_key = f"{uid}_{tid}"
-    d["apps"][app_key] = {"uid": uid, "tid": tid, "file_id": file_id, "status": "checking"}
+    w = d["workers"].setdefault(tid, {})
+    w[str(uid)] = {"status": "checking", "file_id": file_id}
     save(d)
 
     await update.message.reply_text("скриншот отправлен на проверку, ожидай ✅", reply_markup=main_kb())
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
     caption = f"🔍 проверка аккаунта\n\nзадание: #{tid} [{t.get('platform','')}] {t.get('title','')}\nрабочий: {name}"
+    app_key = f"{uid}_{tid}"
+    # сохраняем и в apps для совместимости с admin_bot
+    d["apps"][app_key] = {"uid": uid, "tid": tid, "file_id": file_id, "status": "checking"}
+    save(d)
     kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"acc_ok|{app_key}"),
            InlineKeyboardButton("❌ отказать", callback_data=f"acc_no|{app_key}")]]
     await notify_admins_photo(d, file_id, caption, kb)
@@ -360,14 +369,15 @@ async def review_text_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("задание не найдено", reply_markup=main_kb())
         return ConversationHandler.END
 
-    t["draft"] = review_txt
+    w = d["workers"].setdefault(tid, {})
+    w[str(uid)] = {**w.get(str(uid), {}), "status": "review_check", "draft": review_txt}
     save(d)
 
     await update.message.reply_text("текст отправлен на проверку, ожидай ✅", reply_markup=main_kb())
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
-    kb = [[InlineKeyboardButton("✅ одобрить текст", callback_data=f"txt_ok|{tid}"),
-           InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
+    kb = [[InlineKeyboardButton("✅ одобрить текст", callback_data=f"txt_ok|{tid}|{uid}"),
+           InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}|{uid}")]]
     await notify_admins_text(d,
         f"📝 текст отзыва на проверке\n\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {name}\n\n{review_txt}",
         kb
@@ -399,18 +409,19 @@ async def submit_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = d["t"].get(tid)
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
-        return ConversationHandler.END
+        return
 
     file_id = update.message.photo[-1].file_id
-    t["result"] = file_id
+    w = d["workers"].setdefault(tid, {})
+    w[str(uid)] = {**w.get(str(uid), {}), "status": "done", "result": file_id}
     save(d)
 
     await update.message.reply_text("сдано, ждём проверки 👍", reply_markup=main_kb())
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
     caption = f"📸 скриншот отзыва\n\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {name}"
-    kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
-           InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
+    kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}|{uid}"),
+           InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}|{uid}")]]
     await notify_admins_photo(d, file_id, caption, kb)
 
 
@@ -464,16 +475,21 @@ async def on_withdraw_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def my_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
-    tasks = [(k, v) for k, v in d["t"].items() if v.get("wid") == uid and v["status"] not in ("closed",)]
-    if not tasks:
-        await update.message.reply_text("активных заданий нет", reply_markup=main_kb())
-        return
-    icons = {"active": "🔵", "done": "🟠", "review_check": "🔍"}
-    for tid, t in tasks:
-        icon = icons.get(t["status"], "?")
+    icons = {"active": "🔵", "done": "🟠", "review_check": "🔍", "checking": "🔍"}
+    found = False
+    for tid, t in d["t"].items():
+        w = d["workers"].get(tid, {})
+        my = w.get(str(uid), {})
+        my_status = my.get("status")
+        if not my_status or my_status == "closed":
+            continue
+        found = True
+        icon = icons.get(my_status, "?")
         txt = f"{icon} #{tid} [{t['platform']}]\n{t['title']}"
         kb = [[InlineKeyboardButton("❌ отказ от задания", callback_data=f"canceltask|{tid}")]]
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+    if not found:
+        await update.message.reply_text("активных заданий нет", reply_markup=main_kb())
 
 async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -485,11 +501,13 @@ async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     d = db()
     t = d["t"].get(tid)
-    if not t or t.get("wid") != uid:
+    w = d["workers"].get(tid, {})
+    if not t or str(uid) not in w:
         await q.answer("не найдено")
         return
+    del w[str(uid)]
     save(d)
-    await q.edit_message_text(f"#{tid} возвращено в каталог")
+    await q.edit_message_text(f"#{tid} отменено")
     name = d["u"].get(str(uid), {}).get("name", str(uid))
     await notify_admins_text(d, f"↩ {name} отказался от задания #{tid} [{t['platform']}] {t['title']}")
 
