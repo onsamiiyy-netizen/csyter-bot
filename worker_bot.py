@@ -278,10 +278,7 @@ async def take_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("ты уже берёшь это задание")
         return
     t["workers"].append(uid)
-    t["wid"] = uid  # последний взявший для уведомлений
-    limit = t.get("limit", 1)
-    if len(t["workers"]) >= limit:
-        t["status"] = "active"  # скрываем из каталога только когда набрался лимит
+    t["wid"] = uid
     save(d)
 
     name = d["u"].get(str(uid), {}).get("name", str(uid))
@@ -474,7 +471,8 @@ async def on_withdraw_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def my_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
-    tasks = [(k, v) for k, v in d["t"].items() if v.get("wid") == uid and v["status"] in ("active", "done", "review_check")]
+    tasks = [(k, v) for k, v in d["t"].items() if uid in v.get("workers", []) or v.get("wid") == uid]
+    tasks = [(k, v) for k, v in tasks if v["status"] not in ("closed",)]
     if not tasks:
         await update.message.reply_text("активных заданий нет", reply_markup=main_kb())
         return
@@ -502,9 +500,6 @@ async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         t["workers"] = []
     if uid in t["workers"]:
         t["workers"].remove(uid)
-    if t["status"] == "active" and len(t["workers"]) < t.get("limit", 1):
-        t["status"] = "open"
-    t["wid"] = None
     save(d)
     await q.edit_message_text(f"#{tid} возвращено в каталог")
     name = d["u"].get(str(uid), {}).get("name", str(uid))
