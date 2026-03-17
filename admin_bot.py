@@ -14,12 +14,12 @@ WORKER_TOKEN = os.getenv("WORKER_TOKEN")
 
 def db():
     if not os.path.exists(DB):
-        return {"u": {}, "t": {}, "n": 0, "platforms": [], "apps": {}}
+        return {"u": {}, "t": {}, "n": 0, "platforms": [], "apps": {}, "workers": {}}
     with open(DB, encoding="utf-8") as f:
         d = json.load(f)
-    for k in ("platforms", "apps"):
+    for k in ("platforms", "apps", "workers"):
         if k not in d:
-            d[k] = {} if k == "apps" else []
+            d[k] = {} if k in ("apps", "workers") else []
     return d
 
 def save(d):
@@ -196,16 +196,17 @@ async def on_create_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def all_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
-    tasks = [(k, v) for k, v in d["t"].items() if v["eid"] == uid]
+    tasks = [(k, v) for k, v in d["t"].items() if v.get("eid") == uid]
     if not tasks:
         await update.message.reply_text("заданий нет")
         return
-    icons = {"open": "🟡", "paused": "⏸", "active": "🔵", "review_check": "🔍", "done": "🟠", "closed": "✅"}
+    icons = {"open": "🟡", "paused": "⏸", "closed": "✅"}
     for tid, t in tasks:
-        wname = d["u"].get(str(t["wid"]), {}).get("name", "—") if t["wid"] else "—"
-        icon = icons.get(t["status"], "?")
+        w = d["workers"].get(tid, {})
+        worker_count = len(w)
+        icon = icons.get(t["status"], "🟡")
         ttype = "📋" if t.get("type") == "fixed" else "📝"
-        txt = f"{icon} #{tid} {ttype} [{t['platform']}]\n{t['title']}\nисполнитель: {wname}"
+        txt = f"{icon} #{tid} {ttype} [{t['platform']}]\n{t['title']}\nисполнителей: {worker_count}"
         btns = []
         if t["status"] == "open":
             btns = [InlineKeyboardButton("⏸ пауза", callback_data=f"pause_{tid}"),
@@ -256,8 +257,16 @@ async def check_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     d = db()
     accs = sum(1 for ak, ap in d["apps"].items() if ap.get("status") == "checking" and d["t"].get(str(ap.get("tid")), {}).get("eid") == uid)
-    txts = sum(1 for t in d["t"].values() if t.get("status") == "review_check" and t.get("eid") == uid)
-    revs = sum(1 for t in d["t"].values() if t.get("status") == "done" and t.get("eid") == uid)
+    txts = 0
+    revs = 0
+    for tid, t in d["t"].items():
+        if t.get("eid") != uid:
+            continue
+        for wentry in d["workers"].get(tid, {}).values():
+            if wentry.get("status") == "review_check":
+                txts += 1
+            elif wentry.get("status") == "done":
+                revs += 1
     total = accs + txts + revs
     if total == 0:
         await update.message.reply_text("нечего проверять")
@@ -305,39 +314,45 @@ async def check_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif section == "txt":
         sent = False
         for tid, t in d["t"].items():
-            if t.get("status") != "review_check" or t.get("eid") != uid:
+            if t.get("eid") != uid:
                 continue
-            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-            username = d["u"].get(str(t["wid"]), {}).get("username", "")
-            uinfo = f"@{username}" if username else wname
-            txt = f"📝 текст отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}\n\n{t.get('draft','')}"
-            kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"txt_ok|{tid}"),
-                   InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}")]]
-            await q.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
-            sent = True
+            for wuid, wentry in d["workers"].get(tid, {}).items():
+                if wentry.get("status") != "review_check":
+                    continue
+                wname = d["u"].get(wuid, {}).get("name", wuid)
+                username = d["u"].get(wuid, {}).get("username", "")
+                uinfo = f"@{username}" if username else wname
+                txt = f"📝 текст отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}\n\n{wentry.get('draft','')}"
+                kb = [[InlineKeyboardButton("✅ одобрить", callback_data=f"txt_ok|{tid}|{wuid}"),
+                       InlineKeyboardButton("❌ отклонить", callback_data=f"txt_no|{tid}|{wuid}")]]
+                await q.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
+                sent = True
         if not sent:
             await q.message.reply_text("пусто")
 
     elif section == "rev":
         sent = False
         for tid, t in d["t"].items():
-            if t.get("status") != "done" or t.get("eid") != uid:
+            if t.get("eid") != uid:
                 continue
-            wname = d["u"].get(str(t["wid"]), {}).get("name", str(t["wid"]))
-            username = d["u"].get(str(t["wid"]), {}).get("username", "")
-            uinfo = f"@{username}" if username else wname
-            caption = f"📸 скриншот отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}"
-            kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}"),
-                   InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}")]]
-            buf = await reupload_photo(t["result"])
-            try:
-                if buf:
-                    await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
-                else:
-                    await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
-                sent = True
-            except Exception as e:
-                log.warning(e)
+            for wuid, wentry in d["workers"].get(tid, {}).items():
+                if wentry.get("status") != "done":
+                    continue
+                wname = d["u"].get(wuid, {}).get("name", wuid)
+                username = d["u"].get(wuid, {}).get("username", "")
+                uinfo = f"@{username}" if username else wname
+                caption = f"📸 скриншот отзыва\n#{tid} [{t['platform']}] {t['title']}\nрабочий: {uinfo}"
+                kb = [[InlineKeyboardButton("✅ принять", callback_data=f"rev_ok|{tid}|{wuid}"),
+                       InlineKeyboardButton("❌ отклонить", callback_data=f"rev_no|{tid}|{wuid}")]]
+                buf = await reupload_photo(wentry["result"])
+                try:
+                    if buf:
+                        await q.message.reply_photo(buf, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+                    else:
+                        await q.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(kb))
+                    sent = True
+                except Exception as e:
+                    log.warning(e)
         if not sent:
             await q.message.reply_text("пусто")
 
@@ -353,20 +368,22 @@ async def acc_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_caption("не найдено")
         return
     app["status"] = "approved"
+    uid = app["uid"]
+    tid = str(app.get("tid"))
+    w = d["workers"].setdefault(tid, {})
+    w[str(uid)] = {**w.get(str(uid), {}), "status": "approved"}
     save(d)
-    wname = d["u"].get(str(app["uid"]), {}).get("name", "")
-    t = d["t"].get(str(app.get("tid")), {})
-    platform = t.get("platform", "")
+    wname = d["u"].get(str(uid), {}).get("name", "")
+    t = d["t"].get(tid, {})
     try:
         await q.edit_message_caption(f"✅ одобрено: {wname}")
     except:
         await q.edit_message_text(f"✅ одобрено: {wname}")
     from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
-    tid = str(app.get("tid"))
     kb = [[IKB("📥 взять задание", callback_data=f"take|{tid}|{t.get('platform','')}|0")]]
     try:
         await Bot(WORKER_TOKEN).send_message(
-            app["uid"],
+            uid,
             f"✅ аккаунт одобрен!\n\n#{tid} {t.get('title','')}\n\nнажми кнопку чтобы взять задание:",
             reply_markup=IKM(kb)
         )
@@ -394,28 +411,38 @@ async def acc_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     app["status"] = "rejected"
     app["reason"] = reason
+    uid = app["uid"]
+    tid = str(app.get("tid"))
+    w = d["workers"].setdefault(tid, {})
+    w[str(uid)] = {**w.get(str(uid), {}), "status": "rejected", "reason": reason}
     save(d)
     await update.message.reply_text("отказ отправлен", reply_markup=main_kb())
-    await notify_worker(app["uid"], f"❌ аккаунт отклонён\nпричина: {reason}")
+    await notify_worker(uid, f"❌ аккаунт отклонён\nпричина: {reason}")
     return ConversationHandler.END
 
 # одобрить текст отзыва
 async def txt_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    tid = q.data.split("|")[1]
+    parts = q.data.split("|")
+    tid = parts[1]
+    uid = int(parts[2]) if len(parts) > 2 else None
     d = db()
     t = d["t"].get(tid)
     if not t:
         await q.edit_message_text("не найдено")
         return
-    save(d)
+    if uid:
+        w = d["workers"].setdefault(tid, {})
+        w[str(uid)] = {**w.get(str(uid), {}), "status": "active"}
+        save(d)
     await q.edit_message_text(f"✅ текст одобрен #{tid}")
     from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
     kb = [[IKB("📸 отправить скриншот", callback_data=f"submit_{tid}")]]
     try:
+        target = uid or t.get("wid")
         await Bot(WORKER_TOKEN).send_message(
-            t["wid"],
+            target,
             f"✅ текст одобрен!\n\nопубликуй отзыв и нажми кнопку:",
             reply_markup=IKM(kb)
         )
@@ -426,51 +453,73 @@ async def txt_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def txt_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    ctx.user_data["rej_txt"] = q.data.split("|")[1]
+    parts = q.data.split("|")
+    tid = parts[1]
+    uid = parts[2] if len(parts) > 2 else ""
+    ctx.user_data["rej_txt"] = f"{tid}|{uid}"
     await q.edit_message_text("причина отклонения:")
     return REJECT_TXT
 
 async def txt_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    tid = ctx.user_data.pop("rej_txt")
+    data = ctx.user_data.pop("rej_txt")
+    parts = data.split("|")
+    tid = parts[0]
+    uid = int(parts[1]) if len(parts) > 1 else None
     reason = update.message.text.strip()
     d = db()
     t = d["t"].get(tid)
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
         return ConversationHandler.END
-    t.pop("draft", None)
-    save(d)
+    if uid:
+        w = d["workers"].setdefault(tid, {})
+        entry = w.get(str(uid), {})
+        entry.pop("draft", None)
+        entry["status"] = "active"
+        w[str(uid)] = entry
+        save(d)
     await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
-    await notify_worker(t["wid"], f"❌ текст отзыва отклонён\nпричина: {reason}\n\nперепиши и отправь снова")
+    target = uid or t.get("wid")
+    if target:
+        await notify_worker(target, f"❌ текст отзыва отклонён\nпричина: {reason}\n\nперепиши и отправь снова")
     return ConversationHandler.END
 
 # принять скриншот
 async def rev_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    tid = q.data.split("|")[1]
+    parts = q.data.split("|")
+    tid = parts[1]
+    uid = int(parts[2]) if len(parts) > 2 else None
     d = db()
     t = d["t"].get(tid)
     if not t:
-        await q.edit_message_caption("не найдено")
+        try: await q.edit_message_caption("не найдено")
+        except: await q.edit_message_text("не найдено")
         return
-    t["status"] = "closed"
     price = int(t.get("price", 0) or 0)
-    wid = str(t["wid"])
-    if wid in d["u"]:
-        d["u"][wid]["balance"] = d["u"][wid].get("balance", 0) + price
+    if uid:
+        w = d["workers"].setdefault(tid, {})
+        w[str(uid)] = {**w.get(str(uid), {}), "status": "closed"}
+        wid_str = str(uid)
+        if wid_str in d["u"]:
+            d["u"][wid_str]["balance"] = d["u"][wid_str].get("balance", 0) + price
     save(d)
     try:
         await q.edit_message_caption(f"✅ #{tid} принят")
     except:
         await q.edit_message_text(f"✅ #{tid} принят")
-    await notify_worker(t["wid"], f"✅ отзыв #{tid} принят 🎉\n\n+{price} руб на баланс 💰")
+    if uid:
+        await notify_worker(uid, f"✅ отзыв #{tid} принят 🎉\n\n+{price} руб на баланс 💰")
 
 # отклонить скриншот
 async def rev_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    ctx.user_data["rej_rev"] = q.data.split("|")[1]
+    parts = q.data.split("|")
+    tid = parts[1]
+    uid = parts[2] if len(parts) > 2 else ""
+    ctx.user_data["rej_rev"] = f"{tid}|{uid}"
     try:
         await q.edit_message_caption("причина отклонения:")
     except:
@@ -478,25 +527,33 @@ async def rev_no_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return REJECT_REV
 
 async def rev_no_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    tid = ctx.user_data.pop("rej_rev")
+    data = ctx.user_data.pop("rej_rev")
+    parts = data.split("|")
+    tid = parts[0]
+    uid = int(parts[1]) if len(parts) > 1 and parts[1] else None
     reason = update.message.text.strip()
     d = db()
     t = d["t"].get(tid)
     if not t:
         await update.message.reply_text("не найдено", reply_markup=main_kb())
         return ConversationHandler.END
-    save(d)
+    if uid:
+        w = d["workers"].setdefault(tid, {})
+        w[str(uid)] = {**w.get(str(uid), {}), "status": "active"}
+        save(d)
     await update.message.reply_text(f"↩ #{tid} отклонено", reply_markup=main_kb())
     from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
     kb = [[IKB("📸 отправить скриншот заново", callback_data=f"submit_{tid}")]]
-    try:
-        await Bot(WORKER_TOKEN).send_message(
-            t["wid"],
-            f"❌ скриншот #{tid} отклонён\nпричина: {reason}\n\nисправь и отправь снова:",
-            reply_markup=IKM(kb)
-        )
-    except Exception as e:
-        log.warning(e)
+    target = uid or t.get("wid")
+    if target:
+        try:
+            await Bot(WORKER_TOKEN).send_message(
+                target,
+                f"❌ скриншот #{tid} отклонён\nпричина: {reason}\n\nисправь и отправь снова:",
+                reply_markup=IKM(kb)
+            )
+        except Exception as e:
+            log.warning(e)
     return ConversationHandler.END
 
 
@@ -735,8 +792,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if txt == "📋 задания": await all_tasks(update, ctx)
     elif txt == "🔍 проверить": await check_menu(update, ctx)
     elif txt == "🗂 платформы": await platforms_menu(update, ctx)
-    elif txt == "⚡ штрафы": await fine_start(update, ctx)
-    elif txt == "⚡️ штрафы": await fines_menu(update, ctx)
+    elif txt == "⚡ штрафы": await fines_menu(update, ctx)
     elif txt == "◀️ назад": await start(update, ctx)
     elif txt == "➕ задание": await create_start(update, ctx)
     elif txt == "➕ добавить": await add_pl_start(update, ctx)
@@ -783,7 +839,6 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(withdraw_ok, pattern=r"^wok\|"))
     app.add_handler(CallbackQueryHandler(check_section, pattern="^chk_"))
-    app.add_handler(CallbackQueryHandler(fine_pick, pattern="^fine_"))
     app.add_handler(CallbackQueryHandler(acc_ok, pattern=r"^acc_ok\|"))
     app.add_handler(CallbackQueryHandler(txt_ok, pattern=r"^txt_ok\|"))
     app.add_handler(CallbackQueryHandler(rev_ok, pattern=r"^rev_ok\|"))
@@ -796,3 +851,4 @@ async def main():
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     return app
+    
