@@ -716,11 +716,11 @@ FINE_AMOUNT, FINE_REASON = range(10, 12)
 
 async def fines_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d = db()
-    # рабочие у которых есть выполненные задания
     wids = set()
-    for t in d["t"].values():
-        if t.get("status") in ("closed",) and t.get("wid"):
-            wids.add(str(t["wid"]))
+    for tid, w in d["workers"].items():
+        for wuid, wentry in w.items():
+            if wentry.get("status") == "closed":
+                wids.add(wuid)
     if not wids:
         await update.message.reply_text("нет рабочих с выполненными заданиями")
         return
@@ -851,4 +851,3 @@ async def main():
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     return app
-    
